@@ -1,0 +1,22 @@
+[package]
+name = "elara"
+version = "1.0.0"
+edition = "2024"
+description = "Elara embeddable scripting language and high-performance register VM"
+license = "MIT"
+
+[lib]
+name = "elara"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "elara"
+path = "src/main.rs"
+
+[[bin]]
+name = "elarac"
+path = "src/bin/elarac.rs"
+
+[dependencies]
+
