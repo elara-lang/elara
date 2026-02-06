@@ -85,7 +85,7 @@ impl<'a> Lexer<'a> {
         }
 
         if b.is_ascii_digit() {
-            return self.scan_number();
+            return self.scan_number(b);
         }
 
         match b {
@@ -358,14 +358,267 @@ impl<'a> Lexer<'a> {
             return self.error_token("Identifier exceeds maximum length of 255 bytes");
         }
 
-        self.make_token(TokenKind::Ident)
+        let lexeme = &self.source[self.start..self.current];
+        let kind = classify_keyword(lexeme);
+        self.make_token(kind)
     }
 
-    fn scan_number(&mut self) -> Token<'a> {
-        while !self.is_at_end() && self.peek().is_ascii_digit() {
-            self.advance();
+    fn scan_number(&mut self, first: u8) -> Token<'a> {
+        if first == b'0' {
+            match self.peek() {
+                b'x' | b'X' => {
+                    self.advance();
+                    return self.scan_radix_digits(is_hex_digit);
+                }
+                b'b' | b'B' => {
+                    self.advance();
+                    return self.scan_radix_digits(is_bin_digit);
+                }
+                b'o' | b'O' => {
+                    self.advance();
+                    return self.scan_radix_digits(is_oct_digit);
+                }
+                _ => {}
+            }
+        }
+
+        self.consume_digits_with_underscores(is_dec_digit);
+
+        let mut is_float = false;
+
+        // Fractional part `.digits`, careful not to consume `..` range operator or `.ident` method access.
+        if self.peek() == b'.' && is_dec_digit(self.peek_next()) {
+            is_float = true;
+            self.advance(); // consume '.'
+            self.consume_digits_with_underscores(is_dec_digit);
+        }
+
+        // Scientific exponent `e` or `E`
+        if self.peek() == b'e' || self.peek() == b'E' {
+            is_float = true;
+            self.advance(); // consume 'e' / 'E'
+            if self.peek() == b'+' || self.peek() == b'-' {
+                self.advance();
+            }
+            if !is_dec_digit(self.peek()) {
+                return self.error_token("Invalid float exponent");
+            }
+            self.consume_digits_with_underscores(is_dec_digit);
+        }
+
+        self.make_token(if is_float {
+            TokenKind::Float
+        } else {
+            TokenKind::Int
+        })
+    }
+
+    fn scan_radix_digits(&mut self, pred: fn(u8) -> bool) -> Token<'a> {
+        let digits_start = self.current;
+        self.consume_digits_with_underscores(pred);
+        if self.current == digits_start {
+            return self.error_token("Invalid integer literal");
         }
         self.make_token(TokenKind::Int)
     }
+
+    fn consume_digits_with_underscores(&mut self, pred: fn(u8) -> bool) {
+        while !self.is_at_end() {
+            let b = self.peek();
+            if pred(b) || (b == b'_' && pred(self.peek_next())) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
 }
 
+#[inline]
+const fn is_dec_digit(b: u8) -> bool {
+    b.is_ascii_digit()
+}
+
+#[inline]
+const fn is_hex_digit(b: u8) -> bool {
+    b.is_ascii_hexdigit()
+}
+
+#[inline]
+const fn is_bin_digit(b: u8) -> bool {
+    b == b'0' || b == b'1'
+}
+
+#[inline]
+const fn is_oct_digit(b: u8) -> bool {
+    b >= b'0' && b <= b'7'
+}
+
+/// Dispatches keyword lookup in O(1) via `(lexeme.len(), first_byte)`.
+/// Any identifier with `len < 2 || len > 8` immediately returns `TokenKind::Ident`.
+#[inline]
+#[must_use]
+pub fn classify_keyword(lexeme: &str) -> TokenKind {
+    let bytes = lexeme.as_bytes();
+    let len = bytes.len();
+    if !(2..=8).contains(&len) {
+        return TokenKind::Ident;
+    }
+
+    match (len, bytes[0]) {
+        (2, b'a') if lexeme == "as" => TokenKind::KwAs,
+        (2, b'f') if lexeme == "fn" => TokenKind::KwFn,
+        (2, b'i') => match lexeme {
+            "if" => TokenKind::KwIf,
+            "in" => TokenKind::KwIn,
+            _ => TokenKind::Ident,
+        },
+        (2, b'o') if lexeme == "or" => TokenKind::KwOr,
+        (3, b'a') if lexeme == "and" => TokenKind::KwAnd,
+        (3, b'f') if lexeme == "for" => TokenKind::KwFor,
+        (3, b'l') if lexeme == "let" => TokenKind::KwLet,
+        (3, b'n') => match lexeme {
+            "nil" => TokenKind::KwNil,
+            "not" => TokenKind::KwNot,
+            _ => TokenKind::Ident,
+        },
+        (4, b'e') if lexeme == "else" => TokenKind::KwElse,
+        (4, b's') if lexeme == "self" => TokenKind::KwSelf,
+        (4, b't') if lexeme == "true" => TokenKind::KwTrue,
+        (5, b'b') if lexeme == "break" => TokenKind::KwBreak,
+        (5, b'c') if lexeme == "const" => TokenKind::KwConst,
+        (5, b'd') if lexeme == "defer" => TokenKind::KwDefer,
+        (5, b'f') if lexeme == "false" => TokenKind::KwFalse,
+        (5, b's') if lexeme == "super" => TokenKind::KwSuper,
+        (5, b'w') if lexeme == "while" => TokenKind::KwWhile,
+        (5, b'y') if lexeme == "yield" => TokenKind::KwYield,
+        (6, b'e') if lexeme == "export" => TokenKind::KwExport,
+        (6, b'i') if lexeme == "import" => TokenKind::KwImport,
+        (6, b'r') if lexeme == "return" => TokenKind::KwReturn,
+        (8, b'c') if lexeme == "continue" => TokenKind::KwContinue,
+        _ => TokenKind::Ident,
+    }
+}
+
+/// Zero-copy string unescaper fast-path.
+///
+/// If `raw` contains no backslash (`\`), returns `Ok(raw.as_bytes())` directly from the source
+/// slice without allocating or copying into `scratch`.
+///
+/// # Errors
+///
+/// Returns `Err("Invalid string escape sequence")` if `raw` contains a malformed escape sequence.
+pub fn unescape_string<'a>(
+    raw: &'a str,
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], &'static str> {
+    let bytes = raw.as_bytes();
+    if !bytes.contains(&b'\\') {
+        return Ok(bytes);
+    }
+
+    scratch.clear();
+    scratch.reserve(bytes.len());
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'\\' {
+            scratch.push(b);
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+        if i >= bytes.len() {
+            return Err("Invalid string escape sequence");
+        }
+
+        match bytes[i] {
+            b'"' => {
+                scratch.push(b'"');
+                i += 1;
+            }
+            b'\'' => {
+                scratch.push(b'\'');
+                i += 1;
+            }
+            b'\\' => {
+                scratch.push(b'\\');
+                i += 1;
+            }
+            b'{' => {
+                scratch.push(b'{');
+                i += 1;
+            }
+            b'}' => {
+                scratch.push(b'}');
+                i += 1;
+            }
+            b'n' => {
+                scratch.push(b'\n');
+                i += 1;
+            }
+            b'r' => {
+                scratch.push(b'\r');
+                i += 1;
+            }
+            b't' => {
+                scratch.push(b'\t');
+                i += 1;
+            }
+            b'0' => {
+                scratch.push(0);
+                i += 1;
+            }
+            b'x' => {
+                i += 1;
+                if i + 2 > bytes.len() {
+                    return Err("Invalid string escape sequence");
+                }
+                let hi = hex_val(bytes[i]).ok_or("Invalid string escape sequence")?;
+                let lo = hex_val(bytes[i + 1]).ok_or("Invalid string escape sequence")?;
+                scratch.push((hi << 4) | lo);
+                i += 2;
+            }
+            b'u' => {
+                i += 1;
+                if i >= bytes.len() || bytes[i] != b'{' {
+                    return Err("Invalid string escape sequence");
+                }
+                i += 1;
+                let hex_start = i;
+                let mut codepoint = 0u32;
+                while i < bytes.len() && bytes[i] != b'}' {
+                    let digit = hex_val(bytes[i]).ok_or("Invalid string escape sequence")?;
+                    codepoint = (codepoint << 4) | u32::from(digit);
+                    i += 1;
+                    if i - hex_start > 6 {
+                        return Err("Invalid string escape sequence");
+                    }
+                }
+                if i == hex_start || i >= bytes.len() || bytes[i] != b'}' {
+                    return Err("Invalid string escape sequence");
+                }
+                i += 1; // consume '}'
+                let ch = char::from_u32(codepoint).ok_or("Invalid string escape sequence")?;
+                let mut utf8_buf = [0u8; 4];
+                let encoded = ch.encode_utf8(&mut utf8_buf);
+                scratch.extend_from_slice(encoded.as_bytes());
+            }
+            _ => return Err("Invalid string escape sequence"),
+        }
+    }
+
+    Ok(scratch.as_slice())
+}
+
+#[inline]
+const fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
