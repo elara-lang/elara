@@ -270,3 +270,111 @@ fn unescape_string_returns_zero_copy_slice_when_no_backslash_is_present() {
         Err("Invalid string escape sequence")
     );
 }
+
+#[test]
+fn lexer_tokenizes_single_and_triple_quoted_strings_with_nested_interpolations() {
+    // Plain double-quoted, raw single-quoted, and multiline triple-quoted strings without interpolation
+    let plain = collect_tokens(
+        r#""hello \{world\}" 'raw {not_interp} \'ok\'' """line1
+line2""""#,
+    );
+    assert_eq!(plain.len(), 4);
+    assert_eq!(plain[0].kind, TokenKind::String);
+    assert_eq!(plain[0].lexeme, r#""hello \{world\}""#);
+    assert_eq!(plain[1].kind, TokenKind::String);
+    assert_eq!(plain[1].lexeme, r"'raw {not_interp} \'ok\''");
+    assert_eq!(plain[2].kind, TokenKind::String);
+    assert_eq!(plain[2].lexeme, "\"\"\"line1\nline2\"\"\"");
+    assert_eq!(plain[3].kind, TokenKind::Eof);
+
+    // Nested interpolation with table literal `{k: 1}` inside `"..."` and nested `"""..."""`
+    let interp_src = r#""user: { {name: "ada ({1 + 2})"} }, status: {"""ok: {flag}"""}!""#;
+    let tokens = collect_tokens(interp_src);
+    let pairs: Vec<(TokenKind, &str)> = tokens.into_iter().map(|t| (t.kind, t.lexeme)).collect();
+
+    assert_eq!(
+        pairs,
+        vec![
+            (TokenKind::InterpStart, "\"user: {"),
+            (TokenKind::LBrace, "{"),
+            (TokenKind::Ident, "name"),
+            (TokenKind::Colon, ":"),
+            (TokenKind::InterpStart, "\"ada ({"),
+            (TokenKind::Int, "1"),
+            (TokenKind::Plus, "+"),
+            (TokenKind::Int, "2"),
+            (TokenKind::InterpEnd, "})\""),
+            (TokenKind::RBrace, "}"),
+            (TokenKind::InterpMid, "}, status: {"),
+            (TokenKind::InterpStart, "\"\"\"ok: {"),
+            (TokenKind::Ident, "flag"),
+            (TokenKind::InterpEnd, "}\"\"\""),
+            (TokenKind::InterpEnd, "}!\""),
+            (TokenKind::Eof, ""),
+        ]
+    );
+
+    // Unterminated single-line string hitting newline MUST fail with exact error message.
+    let unclosed = collect_tokens("\"unclosed\n\"");
+    assert_eq!(unclosed[0].kind, TokenKind::Error);
+    assert_eq!(unclosed[0].lexeme, "Unterminated string literal");
+
+    // Exceeding interpolation depth 16 MUST fail with exact error message.
+    let mut deep = String::new();
+    for _ in 0..17 {
+        deep.push_str("\"{");
+    }
+    deep.push('1');
+    for _ in 0..17 {
+        deep.push_str("}\"");
+    }
+    let deep_tokens = collect_tokens(&deep);
+    let last = deep_tokens.last().expect("tokens");
+    assert_eq!(last.kind, TokenKind::Error);
+    assert_eq!(
+        last.lexeme,
+        "Maximum string interpolation depth (16) exceeded"
+    );
+}
+
+#[test]
+fn pratt_precedence_table_matches_binding_power_invariants() {
+    // Verify left-associative (rbp = lbp + 1), right-associative (rbp = lbp - 1), and non-assoc (rbp = lbp).
+    assert_eq!(TokenKind::Assign.binding_power(), (10, 9));
+    assert_eq!(TokenKind::PlusAssign.binding_power(), (10, 9));
+    assert_eq!(TokenKind::ShrAssign.binding_power(), (10, 9));
+    assert_eq!(TokenKind::Question.binding_power(), (20, 19));
+    assert_eq!(TokenKind::QuestionQuestion.binding_power(), (30, 29));
+    assert_eq!(TokenKind::KwOr.binding_power(), (40, 41));
+    assert_eq!(TokenKind::KwAnd.binding_power(), (50, 51));
+    assert_eq!(TokenKind::Eq.binding_power(), (60, 61));
+    assert_eq!(TokenKind::Ne.binding_power(), (60, 61));
+    assert_eq!(TokenKind::Lt.binding_power(), (70, 71));
+    assert_eq!(TokenKind::KwIn.binding_power(), (70, 71));
+    assert_eq!(TokenKind::DotDot.binding_power(), (80, 80));
+    assert_eq!(TokenKind::DotDotEq.binding_power(), (80, 80));
+    assert_eq!(TokenKind::Pipe.binding_power(), (90, 91));
+    assert_eq!(TokenKind::Caret.binding_power(), (100, 101));
+    assert_eq!(TokenKind::Amp.binding_power(), (110, 111));
+    assert_eq!(TokenKind::Shl.binding_power(), (120, 121));
+    assert_eq!(TokenKind::Shr.binding_power(), (120, 121));
+    assert_eq!(TokenKind::Plus.binding_power(), (130, 131));
+    assert_eq!(TokenKind::Minus.binding_power(), (130, 131));
+    assert_eq!(TokenKind::Star.binding_power(), (140, 141));
+    assert_eq!(TokenKind::Slash.binding_power(), (140, 141));
+    assert_eq!(TokenKind::Percent.binding_power(), (140, 141));
+    assert_eq!(TokenKind::StarStar.binding_power(), (150, 149));
+    assert_eq!(TokenKind::LParen.binding_power(), (170, 171));
+    assert_eq!(TokenKind::LBracket.binding_power(), (170, 171));
+    assert_eq!(TokenKind::Dot.binding_power(), (170, 171));
+    assert_eq!(TokenKind::Colon.binding_power(), (170, 171));
+    assert_eq!(TokenKind::Ident.binding_power(), (0, 0));
+
+    // Prefix unary binding power (160)
+    assert_eq!(TokenKind::KwNot.prefix_binding_power(), 160);
+    assert_eq!(TokenKind::Minus.prefix_binding_power(), 160);
+    assert_eq!(TokenKind::Tilde.prefix_binding_power(), 160);
+    assert_eq!(TokenKind::Hash.prefix_binding_power(), 160);
+    assert_eq!(TokenKind::KwYield.prefix_binding_power(), 160);
+    assert_eq!(TokenKind::Plus.prefix_binding_power(), 0);
+}

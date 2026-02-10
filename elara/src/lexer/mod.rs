@@ -13,11 +13,8 @@ pub struct Lexer<'a> {
     column: u16,
     token_line: u32,
     token_column: u16,
-    #[allow(dead_code)]
     interp_depth: usize,
-    #[allow(dead_code)]
     brace_counters: [u8; ELARA_MAX_INTERP_DEPTH],
-    #[allow(dead_code)]
     interp_is_triple: [bool; ELARA_MAX_INTERP_DEPTH],
 }
 
@@ -91,8 +88,34 @@ impl<'a> Lexer<'a> {
         match b {
             b'(' => self.make_token(TokenKind::LParen),
             b')' => self.make_token(TokenKind::RParen),
-            b'{' => self.make_token(TokenKind::LBrace),
-            b'}' => self.make_token(TokenKind::RBrace),
+            b'{' => {
+                if self.interp_depth > 0 {
+                    let idx = self.interp_depth - 1;
+                    self.brace_counters[idx] = self.brace_counters[idx].saturating_add(1);
+                }
+                self.make_token(TokenKind::LBrace)
+            }
+            b'}' => {
+                if self.interp_depth > 0 {
+                    let idx = self.interp_depth - 1;
+                    if self.brace_counters[idx] > 0 {
+                        self.brace_counters[idx] -= 1;
+                        return self.make_token(TokenKind::RBrace);
+                    }
+                    let is_triple = self.interp_is_triple[idx];
+                    return self.scan_double_quoted_segment(false, is_triple);
+                }
+                self.make_token(TokenKind::RBrace)
+            }
+            b'"' => {
+                let is_triple = self.peek() == b'"' && self.peek_next() == b'"';
+                if is_triple {
+                    self.advance();
+                    self.advance();
+                }
+                self.scan_double_quoted_segment(true, is_triple)
+            }
+            b'\'' => self.scan_single_quoted_string(),
             b'[' => self.make_token(TokenKind::LBracket),
             b']' => self.make_token(TokenKind::RBracket),
             b',' => self.make_token(TokenKind::Comma),
@@ -430,6 +453,143 @@ impl<'a> Lexer<'a> {
             } else {
                 break;
             }
+        }
+    }
+
+    fn scan_single_quoted_string(&mut self) -> Token<'a> {
+        while !self.is_at_end() {
+            let b = self.advance();
+            match b {
+                b'\'' => return self.make_token(TokenKind::String),
+                b'\\' => {
+                    if self.is_at_end() {
+                        return self.error_token("Unterminated string literal");
+                    }
+                    let esc = self.advance();
+                    if esc != b'\'' && esc != b'\\' {
+                        return self.error_token("Invalid string escape sequence");
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.error_token("Unterminated string literal")
+    }
+
+    fn scan_double_quoted_segment(&mut self, is_start: bool, is_triple: bool) -> Token<'a> {
+        while !self.is_at_end() {
+            if is_triple {
+                if self.peek() == b'"' && self.peek_next() == b'"' && self.peek_at(2) == b'"' {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    return if is_start {
+                        self.make_token(TokenKind::String)
+                    } else {
+                        self.interp_depth -= 1;
+                        self.make_token(TokenKind::InterpEnd)
+                    };
+                }
+            } else if self.peek() == b'"' {
+                self.advance();
+                return if is_start {
+                    self.make_token(TokenKind::String)
+                } else {
+                    self.interp_depth -= 1;
+                    self.make_token(TokenKind::InterpEnd)
+                };
+            } else if self.peek() == b'\n' {
+                return self.error_token("Unterminated string literal");
+            }
+
+            let b = self.advance();
+            match b {
+                b'{' => {
+                    if is_start {
+                        if self.interp_depth >= ELARA_MAX_INTERP_DEPTH {
+                            return self
+                                .error_token("Maximum string interpolation depth (16) exceeded");
+                        }
+                        self.brace_counters[self.interp_depth] = 0;
+                        self.interp_is_triple[self.interp_depth] = is_triple;
+                        self.interp_depth += 1;
+                        return self.make_token(TokenKind::InterpStart);
+                    }
+                    self.brace_counters[self.interp_depth - 1] = 0;
+                    return self.make_token(TokenKind::InterpMid);
+                }
+                b'\\' => {
+                    if let Err(msg) = self.validate_escape_in_place() {
+                        return self.error_token(msg);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.error_token("Unterminated string literal")
+    }
+
+    fn validate_escape_in_place(&mut self) -> Result<(), &'static str> {
+        if self.is_at_end() {
+            return Err("Unterminated string literal");
+        }
+        let esc = self.advance();
+        match esc {
+            b'"' | b'\'' | b'\\' | b'{' | b'}' | b'n' | b'r' | b't' | b'0' => Ok(()),
+            b'x' => {
+                for _ in 0..2 {
+                    if self.is_at_end() {
+                        return Err("Unterminated string literal");
+                    }
+                    let d = self.advance();
+                    if !d.is_ascii_hexdigit() {
+                        return Err("Invalid string escape sequence");
+                    }
+                }
+                Ok(())
+            }
+            b'u' => {
+                if self.is_at_end() {
+                    return Err("Unterminated string literal");
+                }
+                if self.advance() != b'{' {
+                    return Err("Invalid string escape sequence");
+                }
+                let mut count = 0usize;
+                let mut codepoint = 0u32;
+                loop {
+                    if self.is_at_end() {
+                        return Err("Unterminated string literal");
+                    }
+                    let d = self.advance();
+                    if d == b'}' {
+                        break;
+                    }
+                    let Some(val) = hex_val(d) else {
+                        return Err("Invalid string escape sequence");
+                    };
+                    codepoint = (codepoint << 4) | u32::from(val);
+                    count += 1;
+                    if count > 6 {
+                        return Err("Invalid string escape sequence");
+                    }
+                }
+                if count == 0 || char::from_u32(codepoint).is_none() {
+                    return Err("Invalid string escape sequence");
+                }
+                Ok(())
+            }
+            _ => Err("Invalid string escape sequence"),
+        }
+    }
+
+    #[inline]
+    fn peek_at(&self, offset: usize) -> u8 {
+        let idx = self.current + offset;
+        if idx >= self.bytes.len() {
+            0
+        } else {
+            self.bytes[idx]
         }
     }
 }
