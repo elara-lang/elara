@@ -1,21 +1,26 @@
 //! Zero-copy UTF-8 lexical scanner for the Elara language.
 
+mod keyword;
+mod number;
+mod string;
 pub mod token;
 
+pub use keyword::classify_keyword;
+pub use string::unescape_string;
 pub use token::{ELARA_MAX_IDENT_LEN, ELARA_MAX_INTERP_DEPTH, Token, TokenKind};
 
 pub struct Lexer<'a> {
-    source: &'a str,
-    bytes: &'a [u8],
-    start: usize,
-    current: usize,
-    line: u32,
-    column: u16,
-    token_line: u32,
-    token_column: u16,
-    interp_depth: usize,
-    brace_counters: [u8; ELARA_MAX_INTERP_DEPTH],
-    interp_is_triple: [bool; ELARA_MAX_INTERP_DEPTH],
+    pub(super) source: &'a str,
+    pub(super) bytes: &'a [u8],
+    pub(super) start: usize,
+    pub(super) current: usize,
+    pub(super) line: u32,
+    pub(super) column: u16,
+    pub(super) token_line: u32,
+    pub(super) token_column: u16,
+    pub(super) interp_depth: usize,
+    pub(super) brace_counters: [u8; ELARA_MAX_INTERP_DEPTH],
+    pub(super) interp_is_triple: [bool; ELARA_MAX_INTERP_DEPTH],
 }
 
 impl<'a> Lexer<'a> {
@@ -254,12 +259,12 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn is_at_end(&self) -> bool {
+    pub(super) fn is_at_end(&self) -> bool {
         self.current >= self.bytes.len()
     }
 
     #[inline]
-    fn peek(&self) -> u8 {
+    pub(super) fn peek(&self) -> u8 {
         if self.is_at_end() {
             0
         } else {
@@ -268,7 +273,7 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn peek_next(&self) -> u8 {
+    pub(super) fn peek_next(&self) -> u8 {
         if self.current + 1 >= self.bytes.len() {
             0
         } else {
@@ -277,7 +282,17 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn advance(&mut self) -> u8 {
+    pub(super) fn peek_at(&self, offset: usize) -> u8 {
+        let idx = self.current + offset;
+        if idx >= self.bytes.len() {
+            0
+        } else {
+            self.bytes[idx]
+        }
+    }
+
+    #[inline]
+    pub(super) fn advance(&mut self) -> u8 {
         let b = self.bytes[self.current];
         self.current += 1;
         if b == b'\n' {
@@ -290,7 +305,7 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn match_byte(&mut self, expected: u8) -> bool {
+    pub(super) fn match_byte(&mut self, expected: u8) -> bool {
         if self.is_at_end() || self.bytes[self.current] != expected {
             return false;
         }
@@ -299,7 +314,7 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn make_token(&self, kind: TokenKind) -> Token<'a> {
+    pub(super) fn make_token(&self, kind: TokenKind) -> Token<'a> {
         Token {
             kind,
             lexeme: &self.source[self.start..self.current],
@@ -309,7 +324,7 @@ impl<'a> Lexer<'a> {
     }
 
     #[inline]
-    fn error_token(&self, message: &'static str) -> Token<'a> {
+    pub(super) fn error_token(&self, message: &'static str) -> Token<'a> {
         Token {
             kind: TokenKind::Error,
             lexeme: message,
@@ -326,14 +341,12 @@ impl<'a> Lexer<'a> {
                 }
                 b'/' => {
                     if self.peek_next() == b'/' {
-                        // Line comment (`//` until `\n` or EOF)
                         self.advance();
                         self.advance();
                         while !self.is_at_end() && self.peek() != b'\n' {
                             self.advance();
                         }
                     } else if self.peek_next() == b'*' {
-                        // Nested block comment (`/* ... */`)
                         self.start = self.current;
                         self.token_line = self.line;
                         self.token_column = self.column;
@@ -364,421 +377,5 @@ impl<'a> Lexer<'a> {
             }
         }
         None
-    }
-
-    fn scan_identifier(&mut self) -> Token<'a> {
-        while !self.is_at_end() {
-            let b = self.peek();
-            if b.is_ascii_alphanumeric() || b == b'_' {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-
-        let len = self.current - self.start;
-        if len > ELARA_MAX_IDENT_LEN {
-            return self.error_token("Identifier exceeds maximum length of 255 bytes");
-        }
-
-        let lexeme = &self.source[self.start..self.current];
-        let kind = classify_keyword(lexeme);
-        self.make_token(kind)
-    }
-
-    fn scan_number(&mut self, first: u8) -> Token<'a> {
-        if first == b'0' {
-            match self.peek() {
-                b'x' | b'X' => {
-                    self.advance();
-                    return self.scan_radix_digits(is_hex_digit);
-                }
-                b'b' | b'B' => {
-                    self.advance();
-                    return self.scan_radix_digits(is_bin_digit);
-                }
-                b'o' | b'O' => {
-                    self.advance();
-                    return self.scan_radix_digits(is_oct_digit);
-                }
-                _ => {}
-            }
-        }
-
-        self.consume_digits_with_underscores(is_dec_digit);
-
-        let mut is_float = false;
-
-        // Fractional part `.digits`, careful not to consume `..` range operator or `.ident` method access.
-        if self.peek() == b'.' && is_dec_digit(self.peek_next()) {
-            is_float = true;
-            self.advance(); // consume '.'
-            self.consume_digits_with_underscores(is_dec_digit);
-        }
-
-        // Scientific exponent `e` or `E`
-        if self.peek() == b'e' || self.peek() == b'E' {
-            is_float = true;
-            self.advance(); // consume 'e' / 'E'
-            if self.peek() == b'+' || self.peek() == b'-' {
-                self.advance();
-            }
-            if !is_dec_digit(self.peek()) {
-                return self.error_token("Invalid float exponent");
-            }
-            self.consume_digits_with_underscores(is_dec_digit);
-        }
-
-        self.make_token(if is_float {
-            TokenKind::Float
-        } else {
-            TokenKind::Int
-        })
-    }
-
-    fn scan_radix_digits(&mut self, pred: fn(u8) -> bool) -> Token<'a> {
-        let digits_start = self.current;
-        self.consume_digits_with_underscores(pred);
-        if self.current == digits_start {
-            return self.error_token("Invalid integer literal");
-        }
-        self.make_token(TokenKind::Int)
-    }
-
-    fn consume_digits_with_underscores(&mut self, pred: fn(u8) -> bool) {
-        while !self.is_at_end() {
-            let b = self.peek();
-            if pred(b) || (b == b'_' && pred(self.peek_next())) {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn scan_single_quoted_string(&mut self) -> Token<'a> {
-        while !self.is_at_end() {
-            let b = self.advance();
-            match b {
-                b'\'' => return self.make_token(TokenKind::String),
-                b'\\' => {
-                    if self.is_at_end() {
-                        return self.error_token("Unterminated string literal");
-                    }
-                    let esc = self.advance();
-                    if esc != b'\'' && esc != b'\\' {
-                        return self.error_token("Invalid string escape sequence");
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.error_token("Unterminated string literal")
-    }
-
-    fn scan_double_quoted_segment(&mut self, is_start: bool, is_triple: bool) -> Token<'a> {
-        while !self.is_at_end() {
-            if is_triple {
-                if self.peek() == b'"' && self.peek_next() == b'"' && self.peek_at(2) == b'"' {
-                    self.advance();
-                    self.advance();
-                    self.advance();
-                    return if is_start {
-                        self.make_token(TokenKind::String)
-                    } else {
-                        self.interp_depth -= 1;
-                        self.make_token(TokenKind::InterpEnd)
-                    };
-                }
-            } else if self.peek() == b'"' {
-                self.advance();
-                return if is_start {
-                    self.make_token(TokenKind::String)
-                } else {
-                    self.interp_depth -= 1;
-                    self.make_token(TokenKind::InterpEnd)
-                };
-            } else if self.peek() == b'\n' {
-                return self.error_token("Unterminated string literal");
-            }
-
-            let b = self.advance();
-            match b {
-                b'{' => {
-                    if is_start {
-                        if self.interp_depth >= ELARA_MAX_INTERP_DEPTH {
-                            return self
-                                .error_token("Maximum string interpolation depth (16) exceeded");
-                        }
-                        self.brace_counters[self.interp_depth] = 0;
-                        self.interp_is_triple[self.interp_depth] = is_triple;
-                        self.interp_depth += 1;
-                        return self.make_token(TokenKind::InterpStart);
-                    }
-                    self.brace_counters[self.interp_depth - 1] = 0;
-                    return self.make_token(TokenKind::InterpMid);
-                }
-                b'\\' => {
-                    if let Err(msg) = self.validate_escape_in_place() {
-                        return self.error_token(msg);
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.error_token("Unterminated string literal")
-    }
-
-    fn validate_escape_in_place(&mut self) -> Result<(), &'static str> {
-        if self.is_at_end() {
-            return Err("Unterminated string literal");
-        }
-        let esc = self.advance();
-        match esc {
-            b'"' | b'\'' | b'\\' | b'{' | b'}' | b'n' | b'r' | b't' | b'0' => Ok(()),
-            b'x' => {
-                for _ in 0..2 {
-                    if self.is_at_end() {
-                        return Err("Unterminated string literal");
-                    }
-                    let d = self.advance();
-                    if !d.is_ascii_hexdigit() {
-                        return Err("Invalid string escape sequence");
-                    }
-                }
-                Ok(())
-            }
-            b'u' => {
-                if self.is_at_end() {
-                    return Err("Unterminated string literal");
-                }
-                if self.advance() != b'{' {
-                    return Err("Invalid string escape sequence");
-                }
-                let mut count = 0usize;
-                let mut codepoint = 0u32;
-                loop {
-                    if self.is_at_end() {
-                        return Err("Unterminated string literal");
-                    }
-                    let d = self.advance();
-                    if d == b'}' {
-                        break;
-                    }
-                    let Some(val) = hex_val(d) else {
-                        return Err("Invalid string escape sequence");
-                    };
-                    codepoint = (codepoint << 4) | u32::from(val);
-                    count += 1;
-                    if count > 6 {
-                        return Err("Invalid string escape sequence");
-                    }
-                }
-                if count == 0 || char::from_u32(codepoint).is_none() {
-                    return Err("Invalid string escape sequence");
-                }
-                Ok(())
-            }
-            _ => Err("Invalid string escape sequence"),
-        }
-    }
-
-    #[inline]
-    fn peek_at(&self, offset: usize) -> u8 {
-        let idx = self.current + offset;
-        if idx >= self.bytes.len() {
-            0
-        } else {
-            self.bytes[idx]
-        }
-    }
-}
-
-#[inline]
-const fn is_dec_digit(b: u8) -> bool {
-    b.is_ascii_digit()
-}
-
-#[inline]
-const fn is_hex_digit(b: u8) -> bool {
-    b.is_ascii_hexdigit()
-}
-
-#[inline]
-const fn is_bin_digit(b: u8) -> bool {
-    b == b'0' || b == b'1'
-}
-
-#[inline]
-const fn is_oct_digit(b: u8) -> bool {
-    b >= b'0' && b <= b'7'
-}
-
-/// Dispatches keyword lookup in O(1) via `(lexeme.len(), first_byte)`.
-/// Any identifier with `len < 2 || len > 8` immediately returns `TokenKind::Ident`.
-#[inline]
-#[must_use]
-pub fn classify_keyword(lexeme: &str) -> TokenKind {
-    let bytes = lexeme.as_bytes();
-    let len = bytes.len();
-    if !(2..=8).contains(&len) {
-        return TokenKind::Ident;
-    }
-
-    match (len, bytes[0]) {
-        (2, b'a') if lexeme == "as" => TokenKind::KwAs,
-        (2, b'f') if lexeme == "fn" => TokenKind::KwFn,
-        (2, b'i') => match lexeme {
-            "if" => TokenKind::KwIf,
-            "in" => TokenKind::KwIn,
-            _ => TokenKind::Ident,
-        },
-        (2, b'o') if lexeme == "or" => TokenKind::KwOr,
-        (3, b'a') if lexeme == "and" => TokenKind::KwAnd,
-        (3, b'f') if lexeme == "for" => TokenKind::KwFor,
-        (3, b'l') if lexeme == "let" => TokenKind::KwLet,
-        (3, b'n') => match lexeme {
-            "nil" => TokenKind::KwNil,
-            "not" => TokenKind::KwNot,
-            _ => TokenKind::Ident,
-        },
-        (4, b'e') if lexeme == "else" => TokenKind::KwElse,
-        (4, b's') if lexeme == "self" => TokenKind::KwSelf,
-        (4, b't') if lexeme == "true" => TokenKind::KwTrue,
-        (5, b'b') if lexeme == "break" => TokenKind::KwBreak,
-        (5, b'c') if lexeme == "const" => TokenKind::KwConst,
-        (5, b'd') if lexeme == "defer" => TokenKind::KwDefer,
-        (5, b'f') if lexeme == "false" => TokenKind::KwFalse,
-        (5, b's') if lexeme == "super" => TokenKind::KwSuper,
-        (5, b'w') if lexeme == "while" => TokenKind::KwWhile,
-        (5, b'y') if lexeme == "yield" => TokenKind::KwYield,
-        (6, b'e') if lexeme == "export" => TokenKind::KwExport,
-        (6, b'i') if lexeme == "import" => TokenKind::KwImport,
-        (6, b'r') if lexeme == "return" => TokenKind::KwReturn,
-        (8, b'c') if lexeme == "continue" => TokenKind::KwContinue,
-        _ => TokenKind::Ident,
-    }
-}
-
-/// Zero-copy string unescaper fast-path.
-///
-/// If `raw` contains no backslash (`\`), returns `Ok(raw.as_bytes())` directly from the source
-/// slice without allocating or copying into `scratch`.
-///
-/// # Errors
-///
-/// Returns `Err("Invalid string escape sequence")` if `raw` contains a malformed escape sequence.
-pub fn unescape_string<'a>(
-    raw: &'a str,
-    scratch: &'a mut Vec<u8>,
-) -> Result<&'a [u8], &'static str> {
-    let bytes = raw.as_bytes();
-    if !bytes.contains(&b'\\') {
-        return Ok(bytes);
-    }
-
-    scratch.clear();
-    scratch.reserve(bytes.len());
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b != b'\\' {
-            scratch.push(b);
-            i += 1;
-            continue;
-        }
-
-        i += 1;
-        if i >= bytes.len() {
-            return Err("Invalid string escape sequence");
-        }
-
-        match bytes[i] {
-            b'"' => {
-                scratch.push(b'"');
-                i += 1;
-            }
-            b'\'' => {
-                scratch.push(b'\'');
-                i += 1;
-            }
-            b'\\' => {
-                scratch.push(b'\\');
-                i += 1;
-            }
-            b'{' => {
-                scratch.push(b'{');
-                i += 1;
-            }
-            b'}' => {
-                scratch.push(b'}');
-                i += 1;
-            }
-            b'n' => {
-                scratch.push(b'\n');
-                i += 1;
-            }
-            b'r' => {
-                scratch.push(b'\r');
-                i += 1;
-            }
-            b't' => {
-                scratch.push(b'\t');
-                i += 1;
-            }
-            b'0' => {
-                scratch.push(0);
-                i += 1;
-            }
-            b'x' => {
-                i += 1;
-                if i + 2 > bytes.len() {
-                    return Err("Invalid string escape sequence");
-                }
-                let hi = hex_val(bytes[i]).ok_or("Invalid string escape sequence")?;
-                let lo = hex_val(bytes[i + 1]).ok_or("Invalid string escape sequence")?;
-                scratch.push((hi << 4) | lo);
-                i += 2;
-            }
-            b'u' => {
-                i += 1;
-                if i >= bytes.len() || bytes[i] != b'{' {
-                    return Err("Invalid string escape sequence");
-                }
-                i += 1;
-                let hex_start = i;
-                let mut codepoint = 0u32;
-                while i < bytes.len() && bytes[i] != b'}' {
-                    let digit = hex_val(bytes[i]).ok_or("Invalid string escape sequence")?;
-                    codepoint = (codepoint << 4) | u32::from(digit);
-                    i += 1;
-                    if i - hex_start > 6 {
-                        return Err("Invalid string escape sequence");
-                    }
-                }
-                if i == hex_start || i >= bytes.len() || bytes[i] != b'}' {
-                    return Err("Invalid string escape sequence");
-                }
-                i += 1; // consume '}'
-                let ch = char::from_u32(codepoint).ok_or("Invalid string escape sequence")?;
-                let mut utf8_buf = [0u8; 4];
-                let encoded = ch.encode_utf8(&mut utf8_buf);
-                scratch.extend_from_slice(encoded.as_bytes());
-            }
-            _ => return Err("Invalid string escape sequence"),
-        }
-    }
-
-    Ok(scratch.as_slice())
-}
-
-#[inline]
-const fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
