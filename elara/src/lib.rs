@@ -1,6 +1,7 @@
 //! Elara embeddable scripting language core library.
 
 pub mod lexer;
+pub mod value;
 
 /// Returns the canonical Elara runtime version string.
 #[must_use]
