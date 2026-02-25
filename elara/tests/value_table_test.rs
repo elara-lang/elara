@@ -2,8 +2,10 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::ptr::NonNull;
 
+use elara::gc::GcAllocator;
 use elara::value::{
-    ELARA_INT48_MAX, ELARA_INT48_MIN, GcHeader, ObjBoxedI64, ObjType, Value, hash_u64,
+    ELARA_INT48_MAX, ELARA_INT48_MIN, ELARA_SHORT_STR_MAX, GcHeader, InternPool, ObjBoxedI64,
+    ObjString, ObjType, Value, hash_u64,
 };
 
 #[test]
@@ -171,4 +173,95 @@ fn numeric_equality_and_splitmix64_hashing_unify_i48_boxed_i64_and_f64() {
     );
     let f_rounded = Value::from_f64(i64::MAX as f64);
     assert!(!v_max.val_equal(f_rounded));
+}
+
+#[test]
+fn dual_tier_strings_intern_short_strings_and_lazily_hash_long_strings() {
+    assert_eq!(size_of::<ObjString>(), 24);
+
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+    let mut pool = InternPool::new(0x1234_5678);
+
+    // 1. Short strings (`<= 64B`) are eagerly hashed and globally deduplicated in `InternPool`
+    let s1 = pool
+        .new_string(&mut alloc, &mut all_objects, 0, b"hello elara")
+        .expect("short string 1");
+    let s2 = pool
+        .new_string(&mut alloc, &mut all_objects, 0, b"hello elara")
+        .expect("short string 2");
+    assert_eq!(s1.as_ptr(), s2.as_ptr());
+    assert_eq!(pool.count(), 1);
+    assert!(all_objects.is_null());
+
+    unsafe {
+        assert!((*s1.as_ptr()).is_interned());
+        assert!((*s1.as_ptr()).has_hash());
+        assert_ne!((*s1.as_ptr()).header.aux_hash, 0);
+        assert_eq!((*s1.as_ptr()).as_str(), "hello elara");
+    }
+
+    // 2. 0-based string indexing (including negative index normalization)
+    let ch_0 = pool
+        .index_byte(&mut alloc, 0, unsafe { s1.as_ref() }, 0)
+        .expect("index 0");
+    let ch_last = pool
+        .index_byte(&mut alloc, 0, unsafe { s1.as_ref() }, -1)
+        .expect("index -1");
+    let ch_oob = pool
+        .index_byte(&mut alloc, 0, unsafe { s1.as_ref() }, 99)
+        .expect("index oob");
+    assert!(ch_oob.is_nil());
+    unsafe {
+        assert_eq!((*ch_0.as_obj().cast::<ObjString>()).as_str(), "h");
+        assert_eq!((*ch_last.as_obj().cast::<ObjString>()).as_str(), "a");
+    }
+
+    // 3. Long strings (`> 64B`) are NOT interned and defer FNV-1a hashing until needed
+    let long_bytes = vec![b'x'; ELARA_SHORT_STR_MAX + 32];
+    let l1 = pool
+        .new_string(&mut alloc, &mut all_objects, 0, &long_bytes)
+        .expect("long string 1");
+    let l2 = pool
+        .new_string(&mut alloc, &mut all_objects, 0, &long_bytes)
+        .expect("long string 2");
+
+    // Distinct pointers on `all_objects`, initially unhashed (`has_hash() == false`, `aux_hash == 0`)
+    assert_ne!(l1.as_ptr(), l2.as_ptr());
+    unsafe {
+        assert!(!(*l1.as_ptr()).is_interned());
+        assert!(!(*l1.as_ptr()).has_hash());
+        assert_eq!((*l1.as_ptr()).header.aux_hash, 0);
+    }
+
+    // `val_equal` and `val_hash` lazily compute and cache `aux_hash` and compare equal by content!
+    let v_l1 = Value::from_obj(l1.cast::<GcHeader>(), ObjType::String);
+    let v_l2 = Value::from_obj(l2.cast::<GcHeader>(), ObjType::String);
+    assert!(v_l1.val_equal(v_l2));
+    assert_eq!(v_l1.val_hash(), v_l2.val_hash());
+
+    unsafe {
+        assert!((*l1.as_ptr()).has_hash());
+        assert!((*l2.as_ptr()).has_hash());
+        assert_ne!((*l1.as_ptr()).header.aux_hash, 0);
+    }
+
+    // Clean up long strings on `all_objects` and interned pool; verify zero leaked bytes!
+    unsafe {
+        let mut cur = all_objects;
+        while !cur.is_null() {
+            let next = (*cur).next;
+            let s_ptr = cur.cast::<ObjString>();
+            let sz = ObjString::alloc_size((*s_ptr).byte_len as usize);
+            alloc.free_bytes(s_ptr.cast::<u8>(), sz);
+            cur = next;
+        }
+    }
+    pool.free_all(&mut alloc);
+    assert_eq!(alloc.bytes_allocated, 0);
+
+    // 4. Verify `mem_limit_bytes` enforcement in `GcAllocator`
+    let mut limited = GcAllocator::new();
+    limited.mem_limit_bytes = 32;
+    assert!(limited.alloc_bytes(64).is_none());
 }

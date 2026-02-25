@@ -2,6 +2,7 @@
 
 pub mod nan;
 pub mod ops;
+pub mod string;
 #[cfg(not(target_pointer_width = "64"))]
 pub mod tagged32;
 
@@ -11,3 +12,7 @@ pub use nan::{
     GcHeader, ObjBoxedI64, ObjType, Value,
 };
 pub use ops::{float_to_exact_i64, hash_u64, int_eq_float};
+pub use string::{
+    ELARA_SHORT_STR_MAX, FNV1A_OFFSET_BASIS, FNV1A_PRIME, InternPool, ObjString, STR_FLAG_HAS_HASH,
+    STR_FLAG_INTERNED, fnv1a_hash,
+};
