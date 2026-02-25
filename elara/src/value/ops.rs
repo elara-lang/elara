@@ -1,6 +1,7 @@
 //! Value-semantic equality, cross-numeric comparison, and SplitMix64 hashing.
 
 use super::nan::{ObjType, Value};
+use super::string::ObjString;
 
 /// SplitMix64 64-to-32-bit mixer returning a guaranteed non-zero 32-bit hash.
 #[inline]
@@ -45,6 +46,26 @@ impl Value {
             _ => {}
         }
 
+        // Dual-tier string equality (`ObjType::String`)
+        if self.is_obj_type(ObjType::String) && other.is_obj_type(ObjType::String) {
+            let a_ptr = self.as_obj().cast::<ObjString>();
+            let b_ptr = other.as_obj().cast::<ObjString>();
+            // SAFETY: Both `self` and `other` are verified as `ObjType::String` with distinct pointers.
+            unsafe {
+                // Fast-path: if both strings are globally interned, distinct pointers are never equal!
+                if (*a_ptr).is_interned() && (*b_ptr).is_interned() {
+                    return false;
+                }
+                if (*a_ptr).byte_len != (*b_ptr).byte_len {
+                    return false;
+                }
+                if (*a_ptr).ensure_hash() != (*b_ptr).ensure_hash() {
+                    return false;
+                }
+                return (*a_ptr).as_bytes() == (*b_ptr).as_bytes();
+            }
+        }
+
         false
     }
 
@@ -86,11 +107,8 @@ impl Value {
         if let Some(obj_type) = self.obj_type() {
             let ptr = self.as_obj();
             if obj_type == ObjType::String {
-                // SAFETY: `ptr` is a valid `GcHeader` when `is_obj` is true.
-                let aux = unsafe { (*ptr).aux_hash };
-                if aux != 0 {
-                    return aux;
-                }
+                // SAFETY: `ptr` is verified as `ObjType::String`.
+                return unsafe { (*ptr.cast::<ObjString>()).ensure_hash() };
             }
             return hash_u64(ptr as usize as u64);
         }
@@ -119,4 +137,3 @@ pub fn float_to_exact_i64(d: f64) -> Option<i64> {
     let i = d as i64;
     if (i as f64) == d { Some(i) } else { None }
 }
-
