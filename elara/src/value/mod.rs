@@ -3,6 +3,8 @@
 pub mod nan;
 pub mod ops;
 pub mod string;
+pub mod table;
+mod table_map;
 #[cfg(not(target_pointer_width = "64"))]
 pub mod tagged32;
 
@@ -16,3 +18,4 @@ pub use string::{
     ELARA_SHORT_STR_MAX, FNV1A_OFFSET_BASIS, FNV1A_PRIME, InternPool, ObjString, STR_FLAG_HAS_HASH,
     STR_FLAG_INTERNED, fnv1a_hash,
 };
+pub use table::{MapEntry, ObjTable, key_to_array_index};
