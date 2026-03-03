@@ -4,8 +4,8 @@ use core::ptr::NonNull;
 
 use elara::gc::GcAllocator;
 use elara::value::{
-    ELARA_INT48_MAX, ELARA_INT48_MIN, ELARA_SHORT_STR_MAX, GcHeader, InternPool, ObjBoxedI64,
-    ObjString, ObjType, Value, hash_u64,
+    ELARA_INT48_MAX, ELARA_INT48_MIN, ELARA_SHORT_STR_MAX, GcHeader, InternPool, MapEntry,
+    ObjBoxedI64, ObjString, ObjTable, ObjType, Value, hash_u64,
 };
 
 #[test]
@@ -264,4 +264,152 @@ fn dual_tier_strings_intern_short_strings_and_lazily_hash_long_strings() {
     let mut limited = GcAllocator::new();
     limited.mem_limit_bytes = 32;
     assert!(limited.alloc_bytes(64).is_none());
+}
+
+#[test]
+fn hybrid_table_sizeof_is_64_bytes_and_maintains_array_len_on_push_and_tail_delete() {
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(size_of::<ObjTable>(), 64);
+    assert_eq!(size_of::<MapEntry>(), 24);
+
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+
+    let mut tbl_ptr = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 0, 0).expect("table");
+    let tbl = unsafe { tbl_ptr.as_mut() };
+
+    // 1. Reject `nil` and `NaN` keys with exact message
+    assert_eq!(
+        tbl.set(&mut alloc, Value::NIL, Value::from_i48(1)),
+        Err("Invalid table key: nil or NaN")
+    );
+    assert_eq!(
+        tbl.set(&mut alloc, Value::from_f64(f64::NAN), Value::from_i48(1)),
+        Err("Invalid table key: nil or NaN")
+    );
+
+    // 2. 0-based `push` and contiguous `array_len` maintenance
+    for i in 0..8_i64 {
+        let new_len = tbl
+            .push(&mut alloc, Value::from_i48((i + 1) * 10))
+            .expect("push");
+        assert_eq!(new_len, (i + 1) as u32);
+    }
+    assert_eq!(tbl.array_len, 8);
+    assert_eq!(tbl.get_int(0).to_i64(), Some(10));
+    assert_eq!(tbl.get_int(7).to_i64(), Some(80));
+    assert_eq!(tbl.get_int(-1).to_i64(), Some(80)); // Negative index normalization!
+
+    // 3. Bridging a gap advances `array_len` across pre-populated slots:
+    // Delete index 5 (inside `[0..7]`); `array_len` stays 8 until tail is deleted,
+    // or if we delete 7, 6, 5 then `array_len` retreats to 5!
+    tbl.set(&mut alloc, Value::from_i48(5), Value::NIL)
+        .expect("clear 5");
+    assert_eq!(tbl.array_len, 8);
+
+    // Deleting tail index 7 and 6 retreats `array_len` across the hole at 5 all the way to 5!
+    assert_eq!(tbl.pop().to_i64(), Some(80));
+    assert_eq!(tbl.array_len, 7);
+    assert_eq!(tbl.pop().to_i64(), Some(70));
+    assert_eq!(tbl.array_len, 5);
+
+    // Now write index 6 (beyond `array_len == 5`), then bridge index 5 -> `array_len` jumps from 5 to 7!
+    tbl.set(&mut alloc, Value::from_i48(6), Value::from_i48(700))
+        .expect("set 6");
+    assert_eq!(tbl.array_len, 5);
+    tbl.set(&mut alloc, Value::from_i48(5), Value::from_i48(600))
+        .expect("set 5");
+    assert_eq!(tbl.array_len, 7);
+
+    tbl.free_table(&mut alloc);
+    unsafe { alloc.free_bytes(tbl_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>()) };
+    assert_eq!(alloc.bytes_allocated, 0);
+}
+
+#[test]
+fn robin_hood_hashing_maintains_psl_invariant_backward_shift_deletes_and_iterates_zero_alloc() {
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+    let mut pool = InternPool::new(0xCAFE_BABE);
+
+    let mut tbl_ptr = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 2, 4).expect("table");
+    let tbl = unsafe { tbl_ptr.as_mut() };
+
+    let initial_shape = tbl.header.aux_hash;
+
+    // 1. Insert 20 string keys and 4 dense array elements
+    for i in 0..4_i64 {
+        tbl.set(&mut alloc, Value::from_i48(i), Value::from_i48(i * 100))
+            .expect("array set");
+    }
+
+    let mut keys = Vec::new();
+    for i in 0..20_i64 {
+        let name = format!("field_{i}");
+        let s = pool
+            .intern_always(&mut alloc, 0, name.as_bytes())
+            .expect("intern");
+        let k_val = Value::from_obj(s.cast::<GcHeader>(), ObjType::String);
+        keys.push(k_val);
+        tbl.set(&mut alloc, k_val, Value::from_i48(i + 1000))
+            .expect("hash set");
+    }
+
+    assert_eq!(tbl.array_len, 4);
+    assert_eq!(tbl.hash_count, 20);
+    assert_ne!(tbl.header.aux_hash, initial_shape); // Shape version bumped on rehash!
+
+    // 2. Verify every Robin Hood bucket's PSL matches its exact distance from `(hash & hash_mask)`
+    let mask = tbl.hash_mask;
+    for slot_idx in 0..=mask {
+        let e = unsafe { *tbl.entries.add(slot_idx as usize) };
+        if !e.key.is_nil() {
+            let home = e.hash & mask;
+            let expected_psl = slot_idx.wrapping_sub(home) & mask;
+            assert_eq!(u32::from(e.psl), expected_psl);
+        }
+    }
+
+    // 3. Delete half the hash keys via backward-shift deletion (assigning `Value::NIL`)
+    let shape_before_del = tbl.header.aux_hash;
+    for &k in keys.iter().step_by(2) {
+        tbl.set(&mut alloc, k, Value::NIL).expect("delete key");
+    }
+    assert_eq!(tbl.hash_count, 10);
+    assert_ne!(tbl.header.aux_hash, shape_before_del);
+
+    // Verify deleted keys return `Value::NIL`, remaining keys are still found, and PSL invariant holds!
+    for (i, &k) in keys.iter().enumerate() {
+        let got = tbl.get(k);
+        if i % 2 == 0 {
+            assert!(got.is_nil());
+        } else {
+            assert_eq!(got.to_i64(), Some(i as i64 + 1000));
+        }
+    }
+
+    for slot_idx in 0..=tbl.hash_mask {
+        let e = unsafe { *tbl.entries.add(slot_idx as usize) };
+        if !e.key.is_nil() {
+            let home = e.hash & tbl.hash_mask;
+            let expected_psl = slot_idx.wrapping_sub(home) & tbl.hash_mask;
+            assert_eq!(u32::from(e.psl), expected_psl);
+        }
+    }
+
+    // 4. Verify zero-allocation cursor iteration (`next_entry`) visits all 4 array + 10 hash entries
+    let mut cursor = 0u32;
+    let mut visited_count = 0usize;
+    let bytes_before_iter = alloc.bytes_allocated;
+    while let Some((next_c, _k, _v)) = unsafe { tbl.next_entry(cursor) } {
+        visited_count += 1;
+        cursor = next_c;
+    }
+    assert_eq!(visited_count, 14);
+    assert_eq!(alloc.bytes_allocated, bytes_before_iter); // Zero heap allocations during iteration!
+
+    tbl.free_table(&mut alloc);
+    unsafe { alloc.free_bytes(tbl_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>()) };
+    pool.free_all(&mut alloc);
+    assert_eq!(alloc.bytes_allocated, 0);
 }
