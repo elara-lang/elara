@@ -212,4 +212,3 @@ impl Value {
         self.obj_type() == Some(t)
     }
 }
-

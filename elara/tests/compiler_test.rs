@@ -2,8 +2,8 @@ use core::mem::size_of;
 use core::ptr::NonNull;
 
 use elara::compiler::{
-    ExprKind, FunctionScope, Instruction, ObjProto, OpCode, UpvalDesc, resolve_assignable,
-    resolve_variable,
+    BinOp, ExprDesc, ExprKind, FunctionScope, Instruction, NO_JUMP, ObjProto, OpCode, UnOp,
+    UpvalDesc, encode_rk, resolve_assignable, resolve_variable,
 };
 use elara::gc::GcAllocator;
 use elara::value::{GcHeader, InternPool, ObjBoxedI64, ObjTable, ObjType, Value};
@@ -385,6 +385,208 @@ fn compiler_resolves_multi_level_lexical_upvalues_and_emits_op_close() {
         alloc.free_bytes(d1.as_ptr().cast::<u8>(), size_of::<ObjTable>());
         alloc.free_bytes(p2.as_ptr().cast::<u8>(), size_of::<ObjProto>());
         alloc.free_bytes(d2.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+    }
+    assert_eq!(alloc.bytes_allocated, 0);
+}
+
+#[test]
+fn compiler_folds_constant_expressions_and_specializes_for_range_loops_without_op_range() {
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+
+    let mut proto_ptr =
+        ObjProto::new(&mut alloc, &mut all_objects, 0, core::ptr::null_mut()).expect("proto");
+    let mut dedup_ptr = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 0, 8).expect("dedup");
+
+    let mut scope = FunctionScope::new(proto_ptr.as_ptr(), dedup_ptr.as_ptr());
+    scope.begin_scope();
+
+    // 1. Constant folding: `2 + 3 * 4` and `not false` emit zero bytecode instructions
+    let mul = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Mul,
+            ExprDesc::new(ExprKind::IntImm(3)),
+            ExprDesc::new(ExprKind::IntImm(4)),
+            1,
+        )
+        .expect("fold mul");
+    assert_eq!(mul.kind, ExprKind::IntImm(12));
+
+    let add = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Add,
+            ExprDesc::new(ExprKind::IntImm(2)),
+            mul,
+            1,
+        )
+        .expect("fold add");
+    assert_eq!(add.kind, ExprKind::IntImm(14));
+
+    let not_false = scope
+        .compile_unop(&mut alloc, UnOp::Not, ExprDesc::new(ExprKind::False), 1)
+        .expect("fold not");
+    assert_eq!(not_false.kind, ExprKind::True);
+
+    // Division by zero MUST NOT fold (left to runtime)
+    let code_before_div0 = unsafe { (*proto_ptr.as_ptr()).code_count };
+    let div0 = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Div,
+            ExprDesc::new(ExprKind::IntImm(1)),
+            ExprDesc::new(ExprKind::IntImm(0)),
+            1,
+        )
+        .expect("div0");
+    assert!(matches!(div0.kind, ExprKind::NonReloc { .. }));
+    assert!(unsafe { (*proto_ptr.as_ptr()).code_count } > code_before_div0);
+
+    // Pure folds above emitted no instructions before div0
+    assert_eq!(code_before_div0, 0);
+
+    // 2. Intrusive jump lists: concat pending JMPs and patch all to here
+    let mut list = NO_JUMP;
+    let j0 = scope.emit_jmp_link(&mut alloc, list, 2).expect("jmp0");
+    list = j0;
+    let j1 = scope.emit_jmp_link(&mut alloc, list, 2).expect("jmp1");
+    list = j1;
+    let j2 = scope.emit_jmp_link(&mut alloc, NO_JUMP, 2).expect("jmp2");
+    scope.concat_jump_list(&mut list, j2);
+    assert_eq!(list, j1);
+    assert_eq!(scope.jump_list_next(j1), j0);
+    assert_eq!(scope.jump_list_next(j0), j2);
+    assert_eq!(scope.jump_list_next(j2), NO_JUMP);
+
+    let _ = scope
+        .emit(&mut alloc, Instruction::make_asbx(OpCode::LoadI, 0, 0), 2)
+        .expect("target");
+    let here = scope.pc();
+    scope.patch_jump_list_to_here(list);
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        for jmp in [j0, j1, j2] {
+            let inst = *(*p).code.add(jmp as usize);
+            assert_eq!(inst.opcode(), Some(OpCode::Jmp));
+            let dest = (jmp as i32 + 1 + inst.sj()) as u32;
+            assert_eq!(dest, here);
+        }
+    }
+    assert!(scope.last_target_pc > 0);
+
+    // 3. `RK(C)` / `sC` / `OP_EQI` selection against a runtime local
+    // Reset free_reg so the local lands in R[0] after temporary arith temps.
+    scope.free_reg = 0;
+    let reg_x = scope
+        .declare_local("x", false, false, 3)
+        .expect("declare x");
+    scope.mark_initialized();
+    assert_eq!(reg_x, 0);
+    let x = ExprDesc::new(ExprKind::Local {
+        reg: reg_x,
+        is_const: false,
+    });
+
+    let before_addi = unsafe { (*proto_ptr.as_ptr()).code_count };
+    let addi = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Add,
+            x,
+            ExprDesc::new(ExprKind::IntImm(5)),
+            3,
+        )
+        .expect("addi");
+    assert!(matches!(addi.kind, ExprKind::NonReloc { .. }));
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        let inst = *(*p).code.add(before_addi as usize);
+        assert_eq!(inst.opcode(), Some(OpCode::AddI));
+        assert_eq!(inst.b(), 0);
+        assert_eq!(inst.sc(), 5);
+    }
+
+    // Sub with pool constant uses RK(C) when K index <= 127
+    let k_idx = unsafe {
+        (*proto_ptr.as_ptr())
+            .add_constant(&mut alloc, dedup_ptr.as_mut(), Value::from_i48(100))
+            .expect("K")
+    };
+    assert!(encode_rk(k_idx).is_some());
+    // Drop temps so next emit reuses above locals; keep R[0] as `x`.
+    scope.free_reg = 1;
+    let before_sub = unsafe { (*proto_ptr.as_ptr()).code_count };
+    let sub = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Sub,
+            ExprDesc::new(ExprKind::Local {
+                reg: reg_x,
+                is_const: false,
+            }),
+            ExprDesc::new(ExprKind::Const(k_idx)),
+            3,
+        )
+        .expect("sub rk");
+    assert!(matches!(sub.kind, ExprKind::NonReloc { .. }));
+    unsafe {
+        let inst = *(*proto_ptr.as_ptr()).code.add(before_sub as usize);
+        assert_eq!(inst.opcode(), Some(OpCode::Sub));
+        assert_eq!(inst.c(), encode_rk(k_idx).unwrap());
+    }
+
+    scope.free_reg = 1;
+    // Comparison against small int immediate emits OP_EQI + OP_JMP
+    let before_eqi = unsafe { (*proto_ptr.as_ptr()).code_count };
+    let cmp = scope
+        .compile_binop(
+            &mut alloc,
+            BinOp::Eq,
+            ExprDesc::new(ExprKind::Local {
+                reg: reg_x,
+                is_const: false,
+            }),
+            ExprDesc::new(ExprKind::IntImm(7)),
+            4,
+        )
+        .expect("eqi");
+    assert!(matches!(cmp.kind, ExprKind::Jump { .. }));
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        let eqi = *(*p).code.add(before_eqi as usize);
+        assert_eq!(eqi.opcode(), Some(OpCode::EqI));
+        assert_eq!(eqi.a(), 1);
+        assert_eq!(eqi.sc(), 7);
+        let jmp = *(*p).code.add((before_eqi + 1) as usize);
+        assert_eq!(jmp.opcode(), Some(OpCode::Jmp));
+    }
+
+    // 4. Peephole condition inversion: `not (x == 7)` flips polarity, emits zero extra ops
+    let code_before_not = unsafe { (*proto_ptr.as_ptr()).code_count };
+    let inverted = scope
+        .compile_unop(&mut alloc, UnOp::Not, cmp, 4)
+        .expect("invert");
+    assert_eq!(unsafe { (*proto_ptr.as_ptr()).code_count }, code_before_not);
+    assert!(matches!(inverted.kind, ExprKind::Jump { .. }));
+    unsafe {
+        let eqi = *(*proto_ptr.as_ptr()).code.add(before_eqi as usize);
+        assert_eq!(eqi.a(), 0); // polarity flipped 1 -> 0
+    }
+
+    // 5. Redundant `OP_MOVE R[A], R[A]` is suppressed
+    let code_before_move = unsafe { (*proto_ptr.as_ptr()).code_count };
+    scope.emit_move(&mut alloc, 0, 0, 5).expect("move nop");
+    assert_eq!(
+        unsafe { (*proto_ptr.as_ptr()).code_count },
+        code_before_move
+    );
+
+    unsafe {
+        proto_ptr.as_mut().free_proto(&mut alloc);
+        dedup_ptr.as_mut().free_table(&mut alloc);
+        alloc.free_bytes(proto_ptr.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        alloc.free_bytes(dedup_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>());
     }
     assert_eq!(alloc.bytes_allocated, 0);
 }
