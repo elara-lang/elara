@@ -257,4 +257,3 @@ const fn hex_val(b: u8) -> Option<u8> {
         _ => None,
     }
 }
-

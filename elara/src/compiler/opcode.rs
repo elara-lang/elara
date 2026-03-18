@@ -180,4 +180,3 @@ impl Instruction {
         self.0 = (self.0 & 0x0000_00FF) | (biased << 8);
     }
 }
-

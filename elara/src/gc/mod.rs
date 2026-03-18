@@ -12,4 +12,3 @@ pub const GC_FIXED: u8 = 4;
 
 pub const GC_GEN_NEW: u8 = 0;
 pub const GC_GEN_OLD: u8 = 1;
-

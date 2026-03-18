@@ -93,4 +93,3 @@ const fn is_bin_digit(b: u8) -> bool {
 const fn is_oct_digit(b: u8) -> bool {
     b >= b'0' && b <= b'7'
 }
-
