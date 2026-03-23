@@ -6,6 +6,7 @@ mod jump;
 pub mod opcode;
 pub mod proto;
 pub mod scope;
+mod stmt;
 
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
 pub use opcode::{ELARA_MAX_BX, ELARA_SBX_BIAS, ELARA_SJ_BIAS, Instruction, OpCode};
@@ -17,3 +18,4 @@ pub use scope::{
     CompileError, ExprDesc, ExprKind, FunctionScope, INTRINSIC_NAMES, Local, LoopScope,
     resolve_assignable, resolve_variable,
 };
+pub use stmt::{RangeForInfo, TableBuilder, ceil_log2, newtable_hash_log2};

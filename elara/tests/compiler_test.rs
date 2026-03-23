@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 
 use elara::compiler::{
     BinOp, ExprDesc, ExprKind, FunctionScope, Instruction, NO_JUMP, ObjProto, OpCode, UnOp,
-    UpvalDesc, encode_rk, resolve_assignable, resolve_variable,
+    UpvalDesc, encode_rk, newtable_hash_log2, resolve_assignable, resolve_variable,
 };
 use elara::gc::GcAllocator;
 use elara::value::{GcHeader, InternPool, ObjBoxedI64, ObjTable, ObjType, Value};
@@ -582,11 +582,224 @@ fn compiler_folds_constant_expressions_and_specializes_for_range_loops_without_o
         code_before_move
     );
 
+    // 6. Range `for i in 0..10` specializes to FORPREP/FORLOOP with zero OP_RANGE
+    scope.free_reg = 1;
+    let info = scope
+        .compile_range_for(
+            &mut alloc,
+            ExprDesc::new(ExprKind::IntImm(0)),
+            ExprDesc::new(ExprKind::IntImm(10)),
+            false,
+            6,
+            |_scope, _alloc, _loop_var| Ok(()),
+        )
+        .expect("range for");
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        let prep = *(*p).code.add(info.forprep_pc as usize);
+        let loop_ = *(*p).code.add(info.forloop_pc as usize);
+        assert_eq!(prep.opcode(), Some(OpCode::ForPrep));
+        assert_eq!(loop_.opcode(), Some(OpCode::ForLoop));
+        assert_eq!(prep.a(), info.loop_base);
+        assert_eq!(loop_.a(), info.loop_base);
+        for pc in 0..(*p).code_count {
+            assert_ne!(
+                (*(*p).code.add(pc as usize)).opcode(),
+                Some(OpCode::Range),
+                "OP_RANGE must not be emitted for syntactic range for-loops"
+            );
+        }
+    }
+
     unsafe {
         proto_ptr.as_mut().free_proto(&mut alloc);
         dedup_ptr.as_mut().free_table(&mut alloc);
         alloc.free_bytes(proto_ptr.as_ptr().cast::<u8>(), size_of::<ObjProto>());
         alloc.free_bytes(dedup_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+    }
+    assert_eq!(alloc.bytes_allocated, 0);
+}
+
+#[test]
+fn compiler_backpatches_newtable_capacities_and_evaluates_compound_assign_lhs_once() {
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+
+    let mut proto_ptr =
+        ObjProto::new(&mut alloc, &mut all_objects, 0, core::ptr::null_mut()).expect("proto");
+    let mut dedup_ptr = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 0, 8).expect("dedup");
+
+    let mut scope = FunctionScope::new(proto_ptr.as_ptr(), dedup_ptr.as_ptr());
+    scope.begin_scope();
+
+    // Allocate R[0] for the table and R[1..=3] as array element temps
+    let dst = scope.alloc_regs(4, 1).expect("regs");
+    assert_eq!(dst, 0);
+
+    let mut builder = scope.begin_table(&mut alloc, dst, 1).expect("newtable");
+    let newtable_pc = builder.newtable_pc;
+
+    // Three array elements via SETLIST batch, two hash fields
+    scope
+        .table_setlist(&mut alloc, &mut builder, 3, 0, 1)
+        .expect("setlist");
+    scope
+        .table_settab(&mut alloc, &mut builder, 1, 2, 1)
+        .expect("settab 1");
+    scope
+        .table_settab(&mut alloc, &mut builder, 2, 3, 1)
+        .expect("settab 2");
+    assert_eq!((builder.array_items, builder.hash_items), (3, 2));
+
+    scope.finish_table(builder);
+    unsafe {
+        let inst = *(*proto_ptr.as_ptr()).code.add(newtable_pc as usize);
+        assert_eq!(inst.opcode(), Some(OpCode::NewTable));
+        assert_eq!(inst.b(), 3); // min(array_items, 255)
+        assert_eq!(inst.c(), newtable_hash_log2(2)); // ceil_log2(2*4/3)=ceil_log2(3)=2
+    }
+
+    // Compound assign on Local: `x += 5` -> OP_ADDI R[x], R[x], 5 (single in-place)
+    scope.free_reg = 1;
+    let x = scope.declare_local("x", false, false, 2).expect("x");
+    scope.mark_initialized();
+    let before = unsafe { (*proto_ptr.as_ptr()).code_count };
+    scope
+        .compile_compound_assign(
+            &mut alloc,
+            ExprDesc::new(ExprKind::Local {
+                reg: x,
+                is_const: false,
+            }),
+            BinOp::Add,
+            ExprDesc::new(ExprKind::IntImm(5)),
+            2,
+        )
+        .expect("x+=");
+    unsafe {
+        assert_eq!((*proto_ptr.as_ptr()).code_count, before + 1);
+        let inst = *(*proto_ptr.as_ptr()).code.add(before as usize);
+        assert_eq!(inst.opcode(), Some(OpCode::AddI));
+        assert_eq!(inst.a(), x);
+        assert_eq!(inst.b(), x);
+        assert_eq!(inst.sc(), 5);
+    }
+
+    // Indexed compound assign: table/key evaluated once -> GETTAB, ADDI, SETTAB (3 ops)
+    // R[t]=table, R[k]=key already materialized (single evaluation)
+    scope.free_reg = x + 1;
+    let t = scope.alloc_regs(2, 3).expect("t,k");
+    let k = t + 1;
+    let before_idx = unsafe { (*proto_ptr.as_ptr()).code_count };
+    scope
+        .compile_compound_assign(
+            &mut alloc,
+            ExprDesc::new(ExprKind::Indexed {
+                table_reg: t,
+                key_reg: k,
+            }),
+            BinOp::Add,
+            ExprDesc::new(ExprKind::IntImm(1)),
+            3,
+        )
+        .expect("t[k]+=");
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        assert_eq!((*p).code_count, before_idx + 3);
+        let get = *(*p).code.add(before_idx as usize);
+        let addi = *(*p).code.add((before_idx + 1) as usize);
+        let set = *(*p).code.add((before_idx + 2) as usize);
+        assert_eq!(get.opcode(), Some(OpCode::GetTab));
+        assert_eq!(get.b(), t);
+        assert_eq!(get.c(), k);
+        assert_eq!(addi.opcode(), Some(OpCode::AddI));
+        assert_eq!(set.opcode(), Some(OpCode::SetTab));
+        assert_eq!(set.a(), t);
+        assert_eq!(set.b(), k);
+        // Same table/key registers reused — LHS evaluated exactly once
+        assert_eq!(get.b(), set.a());
+        assert_eq!(get.c(), set.b());
+    }
+
+    unsafe {
+        proto_ptr.as_mut().free_proto(&mut alloc);
+        dedup_ptr.as_mut().free_table(&mut alloc);
+        alloc.free_bytes(proto_ptr.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        alloc.free_bytes(dedup_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+    }
+    assert_eq!(alloc.bytes_allocated, 0);
+}
+
+#[test]
+fn compiler_disables_op_tailcall_when_defer_is_active_in_function_scope() {
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+
+    let mut proto_ptr =
+        ObjProto::new(&mut alloc, &mut all_objects, 0, core::ptr::null_mut()).expect("proto");
+    let mut dedup_ptr = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 0, 4).expect("dedup");
+
+    let mut scope = FunctionScope::new(proto_ptr.as_ptr(), dedup_ptr.as_ptr());
+    scope.begin_scope();
+
+    // Without defer: `return f()` emits OP_TAILCALL
+    let f = scope.alloc_regs(1, 1).expect("f");
+    scope
+        .compile_return_call(&mut alloc, f, 0, 1)
+        .expect("tail");
+    unsafe {
+        let p = proto_ptr.as_ptr();
+        assert_eq!((*p).code_count, 1);
+        let inst = *(*p).code;
+        assert_eq!(inst.opcode(), Some(OpCode::TailCall));
+        assert_eq!(inst.a(), f);
+    }
+
+    // With active defer local: MUST emit CALL + CLOSE + RETURN (never TAILCALL)
+    let mut proto2 =
+        ObjProto::new(&mut alloc, &mut all_objects, 0, core::ptr::null_mut()).expect("proto2");
+    let mut dedup2 = ObjTable::new(&mut alloc, &mut all_objects, 0, 1, 0, 4).expect("dedup2");
+    let mut scope2 = FunctionScope::new(proto2.as_ptr(), dedup2.as_ptr());
+    scope2.begin_scope();
+
+    let defer_reg = scope2
+        .declare_local("__defer", false, true, 2)
+        .expect("defer");
+    scope2.mark_initialized();
+    assert!(scope2.has_active_defer());
+    assert_eq!(scope2.first_defer_reg(), Some(defer_reg));
+
+    let f2 = scope2.alloc_regs(1, 2).expect("f2");
+    scope2
+        .compile_return_call(&mut alloc, f2, 0, 2)
+        .expect("no tail");
+    unsafe {
+        let p = proto2.as_ptr();
+        assert_eq!((*p).code_count, 3);
+        let call = *(*p).code.add(0);
+        let close = *(*p).code.add(1);
+        let ret = *(*p).code.add(2);
+        assert_eq!(call.opcode(), Some(OpCode::Call));
+        assert_eq!(close.opcode(), Some(OpCode::Close));
+        assert_eq!(close.a(), defer_reg);
+        assert_eq!(ret.opcode(), Some(OpCode::Return));
+        for pc in 0..(*p).code_count {
+            assert_ne!(
+                (*(*p).code.add(pc as usize)).opcode(),
+                Some(OpCode::TailCall)
+            );
+        }
+    }
+
+    unsafe {
+        proto_ptr.as_mut().free_proto(&mut alloc);
+        dedup_ptr.as_mut().free_table(&mut alloc);
+        proto2.as_mut().free_proto(&mut alloc);
+        dedup2.as_mut().free_table(&mut alloc);
+        alloc.free_bytes(proto_ptr.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        alloc.free_bytes(dedup_ptr.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+        alloc.free_bytes(proto2.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        alloc.free_bytes(dedup2.as_ptr().cast::<u8>(), size_of::<ObjTable>());
     }
     assert_eq!(alloc.bytes_allocated, 0);
 }
