@@ -9,7 +9,10 @@ pub mod scope;
 mod stmt;
 
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
-pub use opcode::{ELARA_MAX_BX, ELARA_SBX_BIAS, ELARA_SJ_BIAS, Instruction, OpCode};
+pub use opcode::{
+    ELARA_MAX_BX, ELARA_OPCODE_COUNT, ELARA_SBX_BIAS, ELARA_SBX_MAX, ELARA_SBX_MIN, ELARA_SJ_BIAS,
+    ELARA_SJ_MAX, ELARA_SJ_MIN, InstrFormat, Instruction, OpCode, decode_rk, encode_rk_const,
+};
 pub use proto::{
     ELARA_MAX_CONSTANTS, ELARA_MAX_LOCALS, ELARA_MAX_REGISTERS, ELARA_MAX_UPVALUES, LineRun,
     NO_JUMP, ObjProto, UpvalDesc,
