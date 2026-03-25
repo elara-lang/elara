@@ -4,6 +4,30 @@ pub const ELARA_MAX_BX: u16 = 65535;
 pub const ELARA_SBX_BIAS: i32 = 32767;
 pub const ELARA_SJ_BIAS: i32 = 8_388_607;
 
+/// Number of opcodes in the ISA (`0x00..=0x38`).
+pub const ELARA_OPCODE_COUNT: usize = 57;
+
+/// Minimum / maximum signed `sBx` offsets (Excess-32767 encoding).
+pub const ELARA_SBX_MIN: i32 = -32_767;
+pub const ELARA_SBX_MAX: i32 = 32_768;
+
+/// Minimum / maximum signed `sJ` offsets (Excess-8388607 encoding).
+pub const ELARA_SJ_MIN: i32 = -8_388_607;
+pub const ELARA_SJ_MAX: i32 = 8_388_608;
+
+/// Instruction operand layout selected by each `OpCode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstrFormat {
+    /// `A, B, C` — 8-bit fields (`iABC`).
+    Abc,
+    /// `A, Bx` — 16-bit unsigned (`iABx`).
+    Abx,
+    /// `A, sBx` — 16-bit Excess-32767 signed (`iAsBx`).
+    Asbx,
+    /// `sJ` — 24-bit Excess-8388607 signed (`isJ`).
+    Sj,
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCode {
@@ -78,6 +102,120 @@ impl OpCode {
             None
         }
     }
+
+    /// Returns the instruction operand format for `self`.
+    #[inline]
+    #[must_use]
+    pub const fn format(self) -> InstrFormat {
+        match self {
+            Self::LoadK | Self::Closure | Self::Import => InstrFormat::Abx,
+            Self::LoadI | Self::ForPrep | Self::ForLoop | Self::ForIn => InstrFormat::Asbx,
+            Self::Jmp => InstrFormat::Sj,
+            _ => InstrFormat::Abc,
+        }
+    }
+
+    /// Returns the canonical uppercase mnemonic string (e.g. `"ADD"`, `"FORPREP"`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Nop => "NOP",
+            Self::Move => "MOVE",
+            Self::LoadI => "LOADI",
+            Self::LoadK => "LOADK",
+            Self::LoadNil => "LOADNIL",
+            Self::LoadBool => "LOADBOOL",
+            Self::GetUpval => "GETUPVAL",
+            Self::SetUpval => "SETUPVAL",
+            Self::Close => "CLOSE",
+            Self::NewTable => "NEWTABLE",
+            Self::GetTab => "GETTAB",
+            Self::SetTab => "SETTAB",
+            Self::GetI => "GETI",
+            Self::SetI => "SETI",
+            Self::GetField => "GETFIELD",
+            Self::SetField => "SETFIELD",
+            Self::SetList => "SETLIST",
+            Self::SelfMethod => "SELF",
+            Self::Add => "ADD",
+            Self::AddI => "ADDI",
+            Self::Sub => "SUB",
+            Self::Mul => "MUL",
+            Self::Div => "DIV",
+            Self::Mod => "MOD",
+            Self::Pow => "POW",
+            Self::Unm => "UNM",
+            Self::BAnd => "BAND",
+            Self::BOr => "BOR",
+            Self::BXor => "BXOR",
+            Self::Shl => "SHL",
+            Self::Shr => "SHR",
+            Self::BNot => "BNOT",
+            Self::Not => "NOT",
+            Self::Len => "LEN",
+            Self::ConcatN => "CONCAT_N",
+            Self::Eq => "EQ",
+            Self::Lt => "LT",
+            Self::Le => "LE",
+            Self::In => "IN",
+            Self::Test => "TEST",
+            Self::TestSet => "TESTSET",
+            Self::Coalesce => "COALESCE",
+            Self::Jmp => "JMP",
+            Self::ForPrep => "FORPREP",
+            Self::ForLoop => "FORLOOP",
+            Self::ForIn => "FORIN",
+            Self::Range => "RANGE",
+            Self::Closure => "CLOSURE",
+            Self::Call => "CALL",
+            Self::TailCall => "TAILCALL",
+            Self::Return => "RETURN",
+            Self::Vararg => "VARARG",
+            Self::Yield => "YIELD",
+            Self::Import => "IMPORT",
+            Self::EqI => "EQI",
+            Self::LtI => "LTI",
+            Self::LeI => "LEI",
+        }
+    }
+
+    /// Returns `true` when operand `C` may use `RK(C)` register-or-constant addressing.
+    #[inline]
+    #[must_use]
+    pub const fn uses_rk_c(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::Div
+                | Self::Mod
+                | Self::Eq
+                | Self::Lt
+                | Self::Le
+                | Self::SetTab
+        )
+    }
+
+    /// Returns `true` when operand `C` is interpreted as a signed 8-bit immediate `sC`.
+    #[inline]
+    #[must_use]
+    pub const fn uses_sc(self) -> bool {
+        matches!(self, Self::AddI | Self::EqI | Self::LtI | Self::LeI)
+    }
+}
+
+/// Decodes an `RK(C)` operand: `C < 128` → register index; `C >= 128` → `K[C & 0x7F]`.
+#[inline]
+pub const fn decode_rk(c: u8) -> Result<u8, u8> {
+    if c & 0x80 != 0 { Err(c & 0x7F) } else { Ok(c) }
+}
+
+/// Encodes constant pool index `k` (`<= 127`) as an `RK(C)` operand (`0x80 | k`).
+#[inline]
+#[must_use]
+pub const fn encode_rk_const(k: u8) -> u8 {
+    0x80 | (k & 0x7F)
 }
 
 #[repr(transparent)]
@@ -172,6 +310,16 @@ impl Instruction {
     #[inline(always)]
     pub fn patch_b_c(&mut self, b: u8, c: u8) {
         self.0 = (self.0 & 0x0000_FFFF) | ((c as u32) << 16) | ((b as u32) << 24);
+    }
+
+    #[inline(always)]
+    pub fn patch_bx(&mut self, bx: u16) {
+        self.0 = (self.0 & 0x0000_FFFF) | ((bx as u32) << 16);
+    }
+
+    #[inline(always)]
+    pub fn patch_sbx(&mut self, sbx: i32) {
+        self.patch_bx((sbx + ELARA_SBX_BIAS) as u16);
     }
 
     #[inline(always)]
