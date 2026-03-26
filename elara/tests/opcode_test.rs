@@ -1,7 +1,12 @@
+use core::mem::size_of;
+
 use elara::compiler::{
     ELARA_MAX_BX, ELARA_OPCODE_COUNT, ELARA_SBX_MAX, ELARA_SBX_MIN, ELARA_SJ_MAX, ELARA_SJ_MIN,
-    InstrFormat, Instruction, OpCode, decode_rk, encode_rk_const,
+    InstrFormat, Instruction, ObjProto, OpCode, decode_rk, disassemble_instruction,
+    disassemble_proto, encode_rk_const,
 };
+use elara::gc::GcAllocator;
+use elara::value::GcHeader;
 
 #[test]
 fn instruction_methods_encode_and_decode_iabc_iabx_iasbx_and_isj() {
@@ -123,4 +128,86 @@ fn signed_offsets_sbx_and_sj_round_trip_at_boundaries() {
         patched.patch_sj(sj);
         assert_eq!(patched.sj(), sj);
     }
+}
+
+#[test]
+fn disassembler_formats_all_57_opcodes_with_operands_and_lines() {
+    // Every opcode mnemonic appears when formatting a representative instruction.
+    for raw in 0u8..=0x38 {
+        let op = OpCode::from_u8(raw).expect("opcode");
+        let inst = match op.format() {
+            InstrFormat::Abc => Instruction::make_abc(op, 1, 2, encode_rk_const(3)),
+            InstrFormat::Abx => Instruction::make_abx(op, 1, 42),
+            InstrFormat::Asbx => Instruction::make_asbx(op, 1, -5),
+            InstrFormat::Sj => Instruction::make_sj(op, 7),
+        };
+        let line = disassemble_instruction(inst, raw as u32, u32::from(raw) + 1);
+        assert!(
+            line.contains(op.name()),
+            "missing mnemonic {} in `{line}`",
+            op.name()
+        );
+        assert!(
+            line.contains(&format!("{raw:04}")),
+            "missing pc in `{line}`"
+        );
+        assert!(
+            line.contains(&format!("[{:5}]", u32::from(raw) + 1)),
+            "missing line annotation in `{line}`"
+        );
+    }
+
+    // RK / sC / jump target annotations
+    let add = Instruction::make_abc(OpCode::Add, 2, 0, encode_rk_const(5));
+    let add_s = disassemble_instruction(add, 0, 10);
+    assert!(add_s.contains("ADD"));
+    assert!(add_s.contains("R[2]"));
+    assert!(add_s.contains("K[5]"), "{add_s}");
+
+    let addi = Instruction::make_abc(OpCode::AddI, 1, 1, (-3i8) as u8);
+    let addi_s = disassemble_instruction(addi, 1, 11);
+    assert!(addi_s.contains("sC=-3"), "{addi_s}");
+
+    let jmp = Instruction::make_sj(OpCode::Jmp, 4);
+    let jmp_s = disassemble_instruction(jmp, 2, 12);
+    assert!(jmp_s.contains("-> 7"), "{jmp_s}"); // pc+1+sJ = 2+1+4
+
+    // Proto dump includes line RLE and every emitted mnemonic
+    let mut alloc = GcAllocator::new();
+    let mut all_objects: *mut GcHeader = core::ptr::null_mut();
+    let mut proto_ptr =
+        ObjProto::new(&mut alloc, &mut all_objects, 0, core::ptr::null_mut()).expect("proto");
+    let proto = unsafe { proto_ptr.as_mut() };
+
+    let samples = [
+        (Instruction::make_asbx(OpCode::LoadI, 0, 1), 3),
+        (Instruction::make_asbx(OpCode::LoadI, 1, 2), 3),
+        (
+            Instruction::make_abc(OpCode::Add, 2, 0, encode_rk_const(0)),
+            4,
+        ),
+        (Instruction::make_sj(OpCode::Jmp, 1), 4),
+        (Instruction::make_abc(OpCode::Return, 2, 2, 0), 5),
+    ];
+    for (inst, line) in samples {
+        proto
+            .emit_instruction(&mut alloc, inst, line)
+            .expect("emit");
+    }
+
+    let dump = disassemble_proto(proto);
+    assert!(dump.contains("LOADI"), "{dump}");
+    assert!(dump.contains("ADD"), "{dump}");
+    assert!(dump.contains("JMP"), "{dump}");
+    assert!(dump.contains("RETURN"), "{dump}");
+    assert!(dump.contains("[    3]"), "{dump}");
+    assert!(dump.contains("[    4]"), "{dump}");
+    assert!(dump.contains("[    5]"), "{dump}");
+    assert_eq!(dump.lines().filter(|l| l.starts_with("000")).count(), 5);
+
+    unsafe {
+        proto.free_proto(&mut alloc);
+        alloc.free_bytes(proto_ptr.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+    }
+    assert_eq!(alloc.bytes_allocated, 0);
 }
