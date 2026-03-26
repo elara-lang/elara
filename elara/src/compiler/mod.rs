@@ -1,5 +1,6 @@
 //! Single-pass Pratt compiler, lexical scope resolver, function prototypes, and 32-bit ISA.
 
+pub mod disasm;
 pub mod expr;
 mod fold;
 mod jump;
@@ -8,6 +9,7 @@ pub mod proto;
 pub mod scope;
 mod stmt;
 
+pub use disasm::{disassemble_instruction, disassemble_proto};
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
 pub use opcode::{
     ELARA_MAX_BX, ELARA_OPCODE_COUNT, ELARA_SBX_BIAS, ELARA_SBX_MAX, ELARA_SBX_MIN, ELARA_SJ_BIAS,
