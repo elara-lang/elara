@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod gc;
 pub mod lexer;
 pub mod value;
+pub mod vm;
 
 /// Returns the canonical Elara runtime version string.
 #[must_use]
