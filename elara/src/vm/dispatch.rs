@@ -6,6 +6,7 @@ use crate::vm::arith::{
     bin_add, bin_band, bin_bor, bin_bxor, bin_div, bin_mod, bin_mul, bin_shl, bin_shr, bin_sub,
     cmp_le, cmp_lt, rkc, un_bnot, un_neg,
 };
+use crate::vm::call::{ReturnOutcome, op_call, op_concat_n, op_return, op_tailcall, op_vararg};
 use crate::vm::fiber::ObjFiber;
 use crate::vm::state::ElaraState;
 use crate::vm::status::ElaraStatus;
@@ -237,31 +238,48 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 }
                 pc = unsafe { pc.offset(sj as isize) };
             }
-            OpCode::Return => {
-                state.gas_remaining = fuel;
-                // Bottom-frame return ends execution for this task's single-frame runner.
-                fiber.frame_count = fiber.frame_count.saturating_sub(1);
-                if fiber.frame_count == 0 {
-                    let a = inst.a() as u32;
-                    let b = inst.b();
-                    let nret = if b == 0 { 0 } else { u32::from(b) - 1 };
-                    // Leave results at func_idx for the host to read.
-                    let dst = frame.func_idx;
-                    for i in 0..nret {
-                        unsafe {
-                            *fiber.stack.add((dst + i) as usize) = *base.add((a + i) as usize);
-                        }
+            OpCode::Call => {
+                frame.pc = pc;
+                match unsafe { op_call(state, fiber, frame, base, pc, inst) } {
+                    Ok(w) => {
+                        frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
+                        base = w.base;
+                        k = w.k;
+                        pc = w.pc;
                     }
-                    fiber.open_top = dst + nret;
-                    return ElaraStatus::Ok;
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
                 }
-                // Nested returns (multi-frame) land in a later task.
-                frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
-                base = unsafe { fiber.stack.add(frame.base_idx as usize) };
-                k = unsafe { (*(*frame.closure).proto).constants.cast_const() };
-                pc = frame.pc;
             }
-            // Unimplemented opcodes for this foundation change — hard error.
+            OpCode::TailCall => {
+                match unsafe { op_tailcall(state, fiber, frame, base, inst.a(), inst.b()) } {
+                    Ok(w) => {
+                        base = w.base;
+                        k = w.k;
+                        pc = w.pc;
+                    }
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::Return => {
+                match unsafe { op_return(state, fiber, frame, base, inst.a(), inst.b(), fuel) } {
+                    ReturnOutcome::Finished => return ElaraStatus::Ok,
+                    ReturnOutcome::Resume(w) => {
+                        frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
+                        base = w.base;
+                        k = w.k;
+                        pc = w.pc;
+                        fuel = state.gas_remaining;
+                    }
+                }
+            }
+            OpCode::Vararg => {
+                unsafe { op_vararg(fiber, frame, base, inst.a(), inst.b()) };
+            }
+            OpCode::ConcatN => {
+                if let Err(e) = unsafe { op_concat_n(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
             _ => {
                 return finish_err(state, frame, pc, fuel, ElaraStatus::ErrRuntime);
             }

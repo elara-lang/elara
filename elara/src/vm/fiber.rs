@@ -71,19 +71,16 @@ impl ObjFiber {
         NonNull::new(ptr)
     }
 
-    /// Grows `stack` so `needed` slots from the current `open_top` fit.
+    /// Grows `stack` so its capacity is at least `min_capacity`.
     ///
     /// Callers MUST refresh any cached `base: *mut Value` after this returns `Ok`, because
     /// reallocation invalidates raw stack pointers. Frame `base_idx` / `func_idx` stay valid.
     pub fn ensure_stack(
         &mut self,
         alloc: &mut GcAllocator,
-        needed: u32,
+        min_capacity: u32,
     ) -> Result<(), ElaraStatus> {
-        let required = self
-            .open_top
-            .checked_add(needed)
-            .ok_or(ElaraStatus::ErrOom)?;
+        let required = self.open_top.max(min_capacity);
         if required <= self.stack_capacity {
             return Ok(());
         }

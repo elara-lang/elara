@@ -1,6 +1,7 @@
 //! Register-based virtual machine: call frames, fibers, and dispatch.
 
 mod arith;
+mod call;
 pub mod closure;
 pub mod dispatch;
 pub mod fiber;
