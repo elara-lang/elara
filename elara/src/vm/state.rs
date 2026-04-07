@@ -1,12 +1,13 @@
-//! Minimal VM host state (gas + allocator) for the dispatch loop.
+//! Minimal VM host state (gas + allocator + string pool) for the dispatch loop.
 
 use crate::gc::GcAllocator;
-use crate::value::GcHeader;
+use crate::value::{GcHeader, InternPool};
 
 /// Runtime state shared across fibers for a single embedder context.
 pub struct ElaraState {
     pub alloc: GcAllocator,
     pub all_objects: *mut GcHeader,
+    pub strings: InternPool,
     pub gas_remaining: i64,
     pub gas_limit: i64,
 }
@@ -18,6 +19,7 @@ impl ElaraState {
         Self {
             alloc: GcAllocator::new(),
             all_objects: core::ptr::null_mut(),
+            strings: InternPool::new(0xC0FF_EE42),
             gas_remaining: i64::MAX / 4,
             gas_limit: 0,
         }
@@ -29,6 +31,7 @@ impl ElaraState {
         Self {
             alloc: GcAllocator::new(),
             all_objects: core::ptr::null_mut(),
+            strings: InternPool::new(0xC0FF_EE42),
             gas_remaining: limit,
             gas_limit: limit,
         }
