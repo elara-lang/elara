@@ -8,8 +8,18 @@ use crate::value::table::{MapEntry, ObjTable, key_to_array_index};
 
 impl ObjTable {
     pub(super) fn get_from_hash(&self, key: Value) -> Value {
+        match self.find_hash_index(key) {
+            Some(idx) => unsafe { (*self.entries.add(idx as usize)).value },
+            None => Value::NIL,
+        }
+    }
+
+    /// Returns the Robin Hood bucket index for `key`, or `None` if absent.
+    #[inline]
+    #[must_use]
+    pub fn find_hash_index(&self, key: Value) -> Option<u32> {
         if self.entries.is_null() || self.hash_count == 0 {
-            return Value::NIL;
+            return None;
         }
         let hash = key.val_hash();
         let mask = self.hash_mask;
@@ -20,11 +30,10 @@ impl ObjTable {
             // SAFETY: `idx <= self.hash_mask`.
             let entry = unsafe { &*self.entries.add(idx as usize) };
             if entry.key.is_nil() || psl > entry.psl {
-                // Early termination via Robin Hood PSL invariant!
-                return Value::NIL;
+                return None;
             }
             if entry.hash == hash && entry.key.val_equal(key) {
-                return entry.value;
+                return Some(idx);
             }
             idx = (idx + 1) & mask;
             psl += 1;

@@ -6,8 +6,10 @@ pub mod closure;
 pub mod dispatch;
 pub mod fiber;
 pub mod frame;
+mod meta;
 pub mod state;
 pub mod status;
+mod tab;
 
 pub use closure::ObjClosure;
 pub use dispatch::execute;
