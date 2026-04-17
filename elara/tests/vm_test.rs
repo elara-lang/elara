@@ -539,3 +539,643 @@ fn vm_propagates_multiple_return_values_across_nested_calls_and_let_bindings() {
     }
     assert_eq!(state.alloc.bytes_allocated, 0);
 }
+
+fn table_value(t: *mut ObjTable) -> Value {
+    Value::from_obj(
+        core::ptr::NonNull::new(t.cast()).expect("non-null"),
+        ObjType::Table,
+    )
+}
+
+fn emit_inst(p: &mut ObjProto, alloc: &mut GcAllocator, inst: Instruction, line: u32) {
+    p.emit_instruction(alloc, inst, line).expect("emit");
+}
+
+#[test]
+fn vm_dispatches_metatable_metamethods_index_newindex_add_and_call() {
+    let mut state = ElaraState::new();
+
+    let mut index_p = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .unwrap();
+    {
+        let p = unsafe { index_p.as_mut() };
+        p.num_params = 2;
+        p.max_stack_size = 2;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 0, 42),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 0, 2, 0),
+            1,
+        );
+    }
+    let mut add_p = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .unwrap();
+    {
+        let p = unsafe { add_p.as_mut() };
+        p.num_params = 2;
+        p.max_stack_size = 2;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 0, 99),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 0, 2, 0),
+            1,
+        );
+    }
+    let mut call_p = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .unwrap();
+    {
+        let p = unsafe { call_p.as_mut() };
+        p.num_params = 2;
+        p.max_stack_size = 2;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::AddI, 0, 1, 1u8),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 0, 2, 0),
+            1,
+        );
+    }
+
+    let mut main = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .unwrap();
+    let mut dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4).unwrap();
+    {
+        let p = unsafe { main.as_mut() };
+        p.max_stack_size = 16;
+        let kx = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"x")
+            .unwrap();
+        let k_idx = unsafe {
+            (*p).add_constant(
+                &mut state.alloc,
+                dedup.as_mut(),
+                Value::from_obj(kx.cast(), ObjType::String),
+            )
+            .unwrap()
+        };
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abx(OpCode::LoadK, 1, k_idx),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::GetTab, 3, 0, 1),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 8, 7),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::SetTab, 0, 1, 8),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Add, 4, 0, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Move, 9, 0, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 10, 5),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Call, 9, 2, 2),
+            1,
+        );
+        // Return R[3], R[4], R[9] directly
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Move, 5, 9, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 3, 4, 0),
+            1,
+        );
+    }
+
+    let c_index = ObjClosure::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        index_p.as_ptr(),
+    )
+    .unwrap();
+    let c_add =
+        ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, add_p.as_ptr()).unwrap();
+    let c_call =
+        ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, call_p.as_ptr()).unwrap();
+    let c_main =
+        ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, main.as_ptr()).unwrap();
+
+    let mut obj = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4).unwrap();
+    let mut mt = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 8).unwrap();
+    let proxy = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4).unwrap();
+    unsafe {
+        mt.as_mut()
+            .set(
+                &mut state.alloc,
+                state.mm_index,
+                closure_value(c_index.as_ptr()),
+            )
+            .unwrap();
+        mt.as_mut()
+            .set(
+                &mut state.alloc,
+                state.mm_newindex,
+                table_value(proxy.as_ptr()),
+            )
+            .unwrap();
+        mt.as_mut()
+            .set(
+                &mut state.alloc,
+                state.mm_add,
+                closure_value(c_add.as_ptr()),
+            )
+            .unwrap();
+        mt.as_mut()
+            .set(
+                &mut state.alloc,
+                state.mm_call,
+                closure_value(c_call.as_ptr()),
+            )
+            .unwrap();
+        obj.as_mut().metatable = mt.as_ptr();
+    }
+
+    let mut fiber = ObjFiber::new(&mut state.alloc, &mut state.all_objects, 0, 64, 8).unwrap();
+    unsafe {
+        let f = fiber.as_mut();
+        *f.stack.add(0) = closure_value(c_main.as_ptr());
+        *f.stack.add(1) = table_value(obj.as_ptr());
+        *f.stack.add(3) = table_value(proxy.as_ptr());
+        f.open_top = 40;
+        f.push_frame(&mut state.alloc, CallFrame::new(c_main.as_ptr(), 1, 0, 3))
+            .unwrap();
+    }
+
+    let st = unsafe { execute(&mut state, fiber.as_ptr()) };
+    assert_eq!(st, ElaraStatus::Ok);
+    unsafe {
+        let s = fiber.as_ref().stack;
+        assert_eq!((*s.add(0)).to_i64(), Some(42), "index");
+        assert_eq!((*s.add(1)).to_i64(), Some(99), "add");
+        assert_eq!((*s.add(2)).to_i64(), Some(6), "call");
+        let key = *main.as_ref().constants.add(0);
+        assert_eq!(proxy.as_ref().get(key).to_i64(), Some(7), "newindex");
+        assert!(obj.as_ref().get(key).is_nil(), "obj raw");
+    }
+
+    // loops in a second execute on a tiny proto
+    let mut loop_p = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .unwrap();
+    {
+        let p = unsafe { loop_p.as_mut() };
+        p.max_stack_size = 12;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 0, 0),
+            1,
+        ); // sum
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 1, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 2, 3),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 3, 1),
+            1,
+        );
+        let prep = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::ForPrep, 1, 0),
+            1,
+        );
+        let body = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Add, 0, 0, 4),
+            1,
+        );
+        let loop_ = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::ForLoop, 1, 0),
+            1,
+        );
+        unsafe {
+            *p.code.add(prep as usize) =
+                Instruction::make_asbx(OpCode::ForPrep, 1, loop_ as i32 - (prep as i32 + 1));
+            *p.code.add(loop_ as usize) =
+                Instruction::make_asbx(OpCode::ForLoop, 1, body as i32 - (loop_ as i32 + 1));
+        }
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 5, 1),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 6, 4),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Range, 7, 5, 0),
+            1,
+        );
+        // forin over proxy placed at R[8]
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Move, 8, 8, 0),
+            1,
+        ); // nop placeholder
+        // host sets R[8]=proxy; cursor R[9]=0; count R[12]
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 9, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 12, 0),
+            1,
+        );
+        let fi = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::ForIn, 8, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::AddI, 12, 12, 1u8),
+            1,
+        );
+        let jp = p.code_count;
+        emit_inst(p, &mut state.alloc, Instruction::make_sj(OpCode::Jmp, 0), 1);
+        let after = p.code_count;
+        unsafe {
+            *p.code.add(fi as usize) =
+                Instruction::make_asbx(OpCode::ForIn, 8, after as i32 - (fi as i32 + 1));
+            *p.code.add(jp as usize) =
+                Instruction::make_sj(OpCode::Jmp, fi as i32 - (jp as i32 + 1));
+            // remove useless move: replace with LoadNil noop — keep Move of proxy from host register
+            // Actually host puts proxy at stack slot for R[8]; delete the Move instruction by making it Nop
+            // Find Move 8,8 — leave it
+        }
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 0, 3, 0),
+            1,
+        ); // sum, ?, count at R[12] — move count to R[1]
+        // patch: before return move 12->1
+        let ret = p.code_count - 1;
+        unsafe {
+            *p.code.add(ret as usize) = Instruction::make_abc(OpCode::Move, 1, 12, 0);
+        }
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 0, 3, 0),
+            1,
+        );
+    }
+    let c_loop =
+        ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, loop_p.as_ptr()).unwrap();
+    unsafe {
+        fiber.as_mut().frame_count = 0;
+        *fiber.as_mut().stack.add(0) = closure_value(c_loop.as_ptr());
+        *fiber.as_mut().stack.add(9) = table_value(proxy.as_ptr()); // R[8] at base 1 => stack[9]
+        fiber.as_mut().open_top = 24;
+        fiber
+            .as_mut()
+            .push_frame(&mut state.alloc, CallFrame::new(c_loop.as_ptr(), 1, 0, 2))
+            .unwrap();
+        assert_eq!(execute(&mut state, fiber.as_ptr()), ElaraStatus::Ok);
+        assert_eq!((*fiber.as_ref().stack.add(0)).to_i64(), Some(3), "for sum");
+        assert_eq!(
+            (*fiber.as_ref().stack.add(1)).to_i64(),
+            Some(1),
+            "forin count"
+        );
+        let range_v = *fiber.as_ref().stack.add(8); // R[7] with base_idx=1
+        assert!(range_v.is_obj_type(ObjType::Table), "range");
+        let range = range_v.as_obj().cast::<ObjTable>();
+        (*range).free_table(&mut state.alloc);
+        state
+            .alloc
+            .free_bytes(range.cast::<u8>(), size_of::<ObjTable>());
+
+        fiber.as_mut().free_fiber_buffers(&mut state.alloc);
+        state
+            .alloc
+            .free_bytes(fiber.as_ptr().cast::<u8>(), size_of::<ObjFiber>());
+        for c in [
+            c_index.as_ptr(),
+            c_add.as_ptr(),
+            c_call.as_ptr(),
+            c_main.as_ptr(),
+            c_loop.as_ptr(),
+        ] {
+            state
+                .alloc
+                .free_bytes(c.cast::<u8>(), size_of::<ObjClosure>());
+        }
+        for mut p in [index_p, add_p, call_p, main, loop_p] {
+            p.as_mut().free_proto(&mut state.alloc);
+            state
+                .alloc
+                .free_bytes(p.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        }
+        for mut t in [dedup, obj, mt, proxy] {
+            t.as_mut().free_table(&mut state.alloc);
+            state
+                .alloc
+                .free_bytes(t.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+        }
+        state.strings.free_all(&mut state.alloc);
+    }
+    assert_eq!(state.alloc.bytes_allocated, 0);
+}
+
+#[test]
+fn vm_inline_cache_accelerates_getfield_setfield_and_invalidates_on_rehash() {
+    let mut state = ElaraState::new();
+
+    let mut main = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .expect("main");
+    let mut dedup =
+        ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 8).expect("dedup");
+    let (getfield_pc, setfield_pc) = {
+        let p = unsafe { main.as_mut() };
+        p.max_stack_size = 8;
+        let name = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"n")
+            .expect("n");
+        let k = unsafe {
+            (*p).add_constant(
+                &mut state.alloc,
+                dedup.as_mut(),
+                Value::from_obj(name.cast(), ObjType::String),
+            )
+            .expect("k")
+        };
+        let gf = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::GetField, 1, 0, k as u8),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, 2, 1),
+            1,
+        );
+        let sf = p.code_count;
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::SetField, 0, k as u8, 2),
+            1,
+        );
+        for _ in 0..3 {
+            emit_inst(
+                p,
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::GetField, 1, 0, k as u8),
+                1,
+            );
+        }
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 1, 2, 0),
+            1,
+        );
+        (gf, sf)
+    };
+
+    let c_main = ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, main.as_ptr())
+        .expect("c_main");
+    let mut tab = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4).expect("tab");
+    let key = unsafe { *main.as_ref().constants.add(0) };
+    unsafe {
+        tab.as_mut()
+            .set(&mut state.alloc, key, Value::from_i48(10))
+            .unwrap();
+    }
+
+    let mut fiber =
+        ObjFiber::new(&mut state.alloc, &mut state.all_objects, 0, 32, 4).expect("fiber");
+    unsafe {
+        let f = fiber.as_mut();
+        *f.stack.add(0) = closure_value(c_main.as_ptr());
+        *f.stack.add(1) = table_value(tab.as_ptr());
+        f.open_top = 16;
+        f.push_frame(&mut state.alloc, CallFrame::new(c_main.as_ptr(), 1, 0, 2))
+            .unwrap();
+    }
+
+    assert_eq!(
+        unsafe { execute(&mut state, fiber.as_ptr()) },
+        ElaraStatus::Ok
+    );
+    let cached;
+    unsafe {
+        assert_eq!((*fiber.as_ref().stack.add(0)).to_i64(), Some(1));
+        cached = *main.as_ref().ic_slots.add(getfield_pc as usize);
+        assert_ne!(cached, u16::MAX);
+        assert_ne!(*main.as_ref().ic_slots.add(setfield_pc as usize), u16::MAX);
+
+        for i in 0..64i64 {
+            tab.as_mut()
+                .set(
+                    &mut state.alloc,
+                    Value::from_i48(1000 + i),
+                    Value::from_i48(i),
+                )
+                .unwrap();
+        }
+    }
+
+    // Fresh proto + fresh dedup so constant index 0 is local.
+    let mut main2 = ObjProto::new(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        core::ptr::null_mut(),
+    )
+    .expect("main2");
+    let mut dedup2 =
+        ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4).expect("dedup2");
+    {
+        let p = unsafe { main2.as_mut() };
+        p.max_stack_size = 4;
+        let k = unsafe {
+            (*p).add_constant(&mut state.alloc, dedup2.as_mut(), key)
+                .expect("k2")
+        };
+        assert_eq!(k, 0);
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::GetField, 1, 0, 0),
+            1,
+        );
+        emit_inst(
+            p,
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Return, 1, 2, 0),
+            1,
+        );
+        unsafe {
+            *p.ic_slots.add(0) = cached;
+        }
+    }
+    let c2 =
+        ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, main2.as_ptr()).expect("c2");
+
+    unsafe {
+        fiber.as_mut().frame_count = 0;
+        *fiber.as_mut().stack.add(0) = closure_value(c2.as_ptr());
+        *fiber.as_mut().stack.add(1) = table_value(tab.as_ptr());
+        fiber.as_mut().open_top = 8;
+        fiber
+            .as_mut()
+            .push_frame(&mut state.alloc, CallFrame::new(c2.as_ptr(), 1, 0, 2))
+            .unwrap();
+        assert_eq!(execute(&mut state, fiber.as_ptr()), ElaraStatus::Ok);
+        assert_eq!((*fiber.as_ref().stack.add(0)).to_i64(), Some(1));
+        assert_ne!(*main2.as_ref().ic_slots.add(0), u16::MAX);
+
+        fiber.as_mut().free_fiber_buffers(&mut state.alloc);
+        state
+            .alloc
+            .free_bytes(fiber.as_ptr().cast::<u8>(), size_of::<ObjFiber>());
+        state
+            .alloc
+            .free_bytes(c2.as_ptr().cast::<u8>(), size_of::<ObjClosure>());
+        state
+            .alloc
+            .free_bytes(c_main.as_ptr().cast::<u8>(), size_of::<ObjClosure>());
+        main.as_mut().free_proto(&mut state.alloc);
+        main2.as_mut().free_proto(&mut state.alloc);
+        dedup.as_mut().free_table(&mut state.alloc);
+        dedup2.as_mut().free_table(&mut state.alloc);
+        tab.as_mut().free_table(&mut state.alloc);
+        state
+            .alloc
+            .free_bytes(main.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        state
+            .alloc
+            .free_bytes(main2.as_ptr().cast::<u8>(), size_of::<ObjProto>());
+        state
+            .alloc
+            .free_bytes(dedup.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+        state
+            .alloc
+            .free_bytes(dedup2.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+        state
+            .alloc
+            .free_bytes(tab.as_ptr().cast::<u8>(), size_of::<ObjTable>());
+        state.strings.free_all(&mut state.alloc);
+    }
+    assert_eq!(state.alloc.bytes_allocated, 0);
+}

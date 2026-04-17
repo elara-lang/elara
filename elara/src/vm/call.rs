@@ -1,5 +1,7 @@
 //! `OP_CALL`, `OP_TAILCALL`, `OP_RETURN`, `OP_VARARG`, and `OP_CONCAT_N` helpers.
 
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use crate::compiler::opcode::Instruction;
 use crate::value::{ObjString, ObjType, Value};
 use crate::vm::closure::ObjClosure;
@@ -40,42 +42,7 @@ pub unsafe fn op_call(
     };
     let num_results: u16 = if c == 0 { 0xFFFF } else { u16::from(c) - 1 };
 
-    let func_idx = frame.base_idx + u32::from(a);
-    let callable = unsafe { *base.add(a as usize) };
-    let closure = closure_from_value(callable)?;
-    let proto = unsafe { &*(*closure).proto };
-
-    // Pad missing fixed parameters with nil.
-    let new_base = func_idx + 1;
-    for i in num_args..u32::from(proto.num_params) {
-        unsafe {
-            *fiber.stack.add((new_base + i) as usize) = Value::NIL;
-        }
-    }
-
-    let need = new_base + u32::from(proto.max_stack_size);
-    fiber.open_top = fiber.open_top.max(need);
-    fiber.ensure_stack(&mut state.alloc, need)?;
-
-    frame.pc = pc;
-    let new_frame = CallFrame {
-        closure,
-        pc: proto.code.cast_const(),
-        base_idx: new_base,
-        func_idx,
-        num_results,
-        vararg_count: num_args.saturating_sub(u32::from(proto.num_params)) as u16,
-        flags: 0,
-        reserved: [0; 3],
-    };
-    fiber.push_frame(&mut state.alloc, new_frame)?;
-
-    let frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
-    Ok(RegWindow {
-        base: unsafe { fiber.stack.add(frame.base_idx as usize) },
-        k: unsafe { (*(*frame.closure).proto).constants.cast_const() },
-        pc: frame.pc,
-    })
+    crate::vm::meta::call_or_metamethod(state, fiber, frame, base, pc, a, num_args, num_results)
 }
 
 /// In-place `OP_TAILCALL A, B` reusing the current frame ($O(1)$ stack frames).

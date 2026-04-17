@@ -6,10 +6,17 @@ use crate::vm::arith::{
     bin_add, bin_band, bin_bor, bin_bxor, bin_div, bin_mod, bin_mul, bin_shl, bin_shr, bin_sub,
     cmp_le, cmp_lt, rkc, un_bnot, un_neg,
 };
-use crate::vm::call::{ReturnOutcome, op_call, op_concat_n, op_return, op_tailcall, op_vararg};
+use crate::vm::call::{
+    RegWindow, ReturnOutcome, op_call, op_concat_n, op_return, op_tailcall, op_vararg,
+};
 use crate::vm::fiber::ObjFiber;
+use crate::vm::meta::meta_add;
 use crate::vm::state::ElaraState;
 use crate::vm::status::ElaraStatus;
+use crate::vm::tab::{
+    op_forin, op_forloop, op_forprep, op_getfield, op_geti, op_gettab, op_len, op_newtable,
+    op_range, op_self, op_setfield, op_seti, op_setlist, op_settab,
+};
 
 /// Executes `fiber` until return from the bottom frame, yield, or error.
 ///
@@ -32,6 +39,7 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
     // SAFETY: closure/proto established by frame setup.
     let mut base = unsafe { fiber.stack.add(frame.base_idx as usize) };
     let mut k = unsafe { (*(*frame.closure).proto).constants.cast_const() };
+    let mut ic = unsafe { (*(*frame.closure).proto).ic_slots };
     let mut pc = frame.pc;
 
     loop {
@@ -87,8 +95,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 }
             }
             OpCode::Add => {
-                if let Err(e) = bin_op(base, k, inst, bin_add) {
-                    return finish_err(state, frame, pc, fuel, e);
+                let a = inst.a();
+                let vb = unsafe { *base.add(inst.b() as usize) };
+                let vc = unsafe { rkc(base, k, inst.c()) };
+                match bin_add(vb, vc) {
+                    Ok(v) => unsafe { *base.add(a as usize) = v },
+                    Err(_) => match unsafe { meta_add(state, fiber, frame, base, pc, a, vb, vc) } {
+                        Ok(w) => {
+                            apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                        }
+                        Err(e) => return finish_err(state, frame, pc, fuel, e),
+                    },
                 }
             }
             OpCode::AddI => {
@@ -238,14 +255,105 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 }
                 pc = unsafe { pc.offset(sj as isize) };
             }
+            OpCode::NewTable => {
+                if let Err(e) = unsafe { op_newtable(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::GetTab => {
+                let table = unsafe { *base.add(inst.b() as usize) };
+                let key = unsafe { *base.add(inst.c() as usize) };
+                match unsafe { op_gettab(state, fiber, frame, base, pc, inst.a(), table, key) } {
+                    Ok(Some(w)) => {
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::SetTab => {
+                let table = unsafe { *base.add(inst.a() as usize) };
+                let key = unsafe { *base.add(inst.b() as usize) };
+                let val = unsafe { rkc(base, k, inst.c()) };
+                match unsafe { op_settab(state, fiber, frame, base, pc, inst.a(), table, key, val) }
+                {
+                    Ok(Some(w)) => {
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::GetI => {
+                if let Err(e) = unsafe { op_geti(base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::SetI => {
+                if let Err(e) = unsafe { op_seti(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::GetField => {
+                match unsafe { op_getfield(state, fiber, frame, base, k, ic, pc, inst) } {
+                    Ok(Some(w)) => {
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::SetField => {
+                match unsafe { op_setfield(state, fiber, frame, base, k, ic, pc, inst) } {
+                    Ok(Some(w)) => {
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::SetList => {
+                if let Err(e) = unsafe { op_setlist(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::SelfMethod => {
+                match unsafe { op_self(state, fiber, frame, base, k, ic, pc, inst) } {
+                    Ok(Some(w)) => {
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                    }
+                    Ok(None) => {}
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::Len => {
+                if let Err(e) = unsafe { op_len(base, inst.a(), inst.b()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::ForPrep => {
+                pc = unsafe { op_forprep(base, pc, inst) };
+            }
+            OpCode::ForLoop => {
+                match unsafe { op_forloop(base, pc, inst, gas_limited, &mut fuel) } {
+                    Ok(p) => pc = p,
+                    Err(e) => return finish_err(state, frame, pc, fuel, e),
+                }
+            }
+            OpCode::ForIn => match unsafe { op_forin(base, pc, inst) } {
+                Ok(p) => pc = p,
+                Err(e) => return finish_err(state, frame, pc, fuel, e),
+            },
+            OpCode::Range => {
+                if let Err(e) = unsafe { op_range(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
             OpCode::Call => {
                 frame.pc = pc;
                 match unsafe { op_call(state, fiber, frame, base, pc, inst) } {
                     Ok(w) => {
-                        frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
-                        base = w.base;
-                        k = w.k;
-                        pc = w.pc;
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Err(e) => return finish_err(state, frame, pc, fuel, e),
                 }
@@ -255,6 +363,7 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     Ok(w) => {
                         base = w.base;
                         k = w.k;
+                        ic = unsafe { (*(*frame.closure).proto).ic_slots };
                         pc = w.pc;
                     }
                     Err(e) => return finish_err(state, frame, pc, fuel, e),
@@ -264,10 +373,7 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 match unsafe { op_return(state, fiber, frame, base, inst.a(), inst.b(), fuel) } {
                     ReturnOutcome::Finished => return ElaraStatus::Ok,
                     ReturnOutcome::Resume(w) => {
-                        frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
-                        base = w.base;
-                        k = w.k;
-                        pc = w.pc;
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w);
                         fuel = state.gas_remaining;
                     }
                 }
@@ -349,6 +455,23 @@ fn as_num(v: Value) -> Option<f64> {
     } else {
         None
     }
+}
+
+#[inline]
+fn apply_window(
+    frame: &mut &mut crate::vm::frame::CallFrame,
+    fiber: &mut ObjFiber,
+    base: &mut *mut Value,
+    k: &mut *const Value,
+    ic: &mut *mut u16,
+    pc: &mut *const Instruction,
+    w: RegWindow,
+) {
+    *frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
+    *base = w.base;
+    *k = w.k;
+    *ic = unsafe { (*(*frame.closure).proto).ic_slots };
+    *pc = w.pc;
 }
 
 #[inline]
