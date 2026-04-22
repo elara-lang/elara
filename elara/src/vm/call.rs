@@ -17,9 +17,11 @@ pub struct RegWindow {
     pub pc: *const Instruction,
 }
 
-/// Stub: open upvalue closing is implemented with the upvalue subsystem.
+/// Closes open upvalues (and defer slots) at or above `level`.
 #[inline]
-pub fn close_upvalues(_state: &mut ElaraState, _fiber: &mut ObjFiber, _level: u32) {}
+pub fn close_upvalues(state: &mut ElaraState, fiber: &mut ObjFiber, level: u32) {
+    let _ = unsafe { crate::vm::upvalue::close_upvalues_from(state, fiber, level) };
+}
 
 /// Prepares and pushes a new frame for `OP_CALL A, B, C`.
 pub unsafe fn op_call(
