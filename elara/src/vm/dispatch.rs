@@ -17,6 +17,7 @@ use crate::vm::tab::{
     op_forin, op_forloop, op_forprep, op_getfield, op_geti, op_gettab, op_len, op_newtable,
     op_range, op_self, op_setfield, op_seti, op_setlist, op_settab,
 };
+use crate::vm::upvalue::{op_close, op_closure, op_getupval, op_setupval};
 
 /// Executes `fiber` until return from the bottom frame, yield, or error.
 ///
@@ -92,6 +93,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 unsafe { *base.add(a) = Value::from_bool(inst.b() != 0) };
                 if inst.c() != 0 {
                     pc = unsafe { pc.add(1) };
+                }
+            }
+            OpCode::GetUpval => {
+                unsafe { op_getupval(frame, base, inst.a(), inst.b()) };
+            }
+            OpCode::SetUpval => {
+                unsafe { op_setupval(state, frame, base, inst.a(), inst.b()) };
+            }
+            OpCode::Close => {
+                if let Err(e) = unsafe { op_close(state, fiber, frame, inst.a()) } {
+                    return finish_err(state, frame, pc, fuel, e);
                 }
             }
             OpCode::Add => {
@@ -346,6 +358,13 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
             },
             OpCode::Range => {
                 if let Err(e) = unsafe { op_range(state, base, inst.a(), inst.b(), inst.c()) } {
+                    return finish_err(state, frame, pc, fuel, e);
+                }
+            }
+            OpCode::Closure => {
+                if let Err(e) =
+                    unsafe { op_closure(state, fiber, frame, base, inst.a(), u32::from(inst.bx())) }
+                {
                     return finish_err(state, frame, pc, fuel, e);
                 }
             }
