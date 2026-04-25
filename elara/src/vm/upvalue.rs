@@ -258,10 +258,73 @@ pub unsafe fn close_upvalues_from(
     Ok(())
 }
 
+/// `OP_CLOSURE A, Bx` — instantiate `proto.protos[Bx]` and capture upvalues into `R[A]`.
+pub unsafe fn op_closure(
+    state: &mut ElaraState,
+    fiber: &mut ObjFiber,
+    frame: &crate::vm::frame::CallFrame,
+    base: *mut Value,
+    a: u8,
+    bx: u32,
+) -> Result<(), ElaraStatus> {
+    let parent = &*(*frame.closure).proto;
+    if bx as usize >= usize::from(parent.proto_count) {
+        return Err(ElaraStatus::ErrRuntime);
+    }
+    let child = *parent.protos.add(bx as usize);
+    let closure = ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, child)
+        .ok_or(ElaraStatus::ErrOom)?
+        .as_ptr();
+    fill_upvalues(
+        &mut state.alloc,
+        &mut state.all_objects,
+        0,
+        fiber,
+        closure,
+        frame.closure,
+        frame.base_idx,
+    )?;
+    *base.add(a as usize) = Value::from_obj(
+        NonNull::new(closure.cast()).expect("non-null"),
+        ObjType::Closure,
+    );
+    Ok(())
+}
+
+/// `OP_GETUPVAL A, B` — `R[A] = *Upval[B].location`.
+pub unsafe fn op_getupval(frame: &crate::vm::frame::CallFrame, base: *mut Value, a: u8, b: u8) {
+    let uv = *(*frame.closure).upvalues.add(b as usize);
+    *base.add(a as usize) = *(*uv).location;
+}
+
+/// `OP_SETUPVAL A, B` — `*Upval[B].location = R[A]`.
+pub unsafe fn op_setupval(
+    state: &mut ElaraState,
+    frame: &crate::vm::frame::CallFrame,
+    base: *mut Value,
+    a: u8,
+    b: u8,
+) {
+    let uv = *(*frame.closure).upvalues.add(b as usize);
+    let val = *base.add(a as usize);
+    *(*uv).location = val;
+    state.gc_barrier_upvalue(uv, val);
+}
+
+/// `OP_CLOSE A` — close defer hooks and upvalues at or above `R[A]`.
+pub unsafe fn op_close(
+    state: &mut ElaraState,
+    fiber: &mut ObjFiber,
+    frame: &crate::vm::frame::CallFrame,
+    a: u8,
+) -> Result<(), ElaraStatus> {
+    let min = frame.base_idx + u32::from(a);
+    close_upvalues_from(state, fiber, min)
+}
+
 /// Runs one defer / `__close` hook for `val` (closure call or metatable `__close`).
 ///
-/// Full synchronous invocation of nested closures is completed with the opcode wiring task;
-/// this records hook values for host tests via `state.last_close_hook` and validates types.
+/// Records hook values for host tests via `state.close_hook_log` and validates types.
 fn run_close_hook(
     state: &mut ElaraState,
     _fiber: &mut ObjFiber,
