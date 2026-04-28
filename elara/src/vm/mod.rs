@@ -14,7 +14,9 @@ pub mod upvalue;
 
 pub use closure::ObjClosure;
 pub use dispatch::execute;
-pub use fiber::ObjFiber;
+pub use fiber::{
+    ELARA_MAX_CALL_DEPTH, ELARA_MAX_STACK_SLOTS, ELARA_MIN_STACK_SLOTS, FiberStatus, ObjFiber,
+};
 pub use frame::{CallFrame, FRAME_FLAG_C_BOUNDARY, FRAME_FLAG_PCALL};
 pub use state::ElaraState;
 pub use status::ElaraStatus;
