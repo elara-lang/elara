@@ -2,6 +2,7 @@
 
 use crate::gc::GcAllocator;
 use crate::value::{GcHeader, InternPool, ObjType, Value};
+use crate::vm::fiber::ObjFiber;
 use crate::vm::upvalue::ObjUpvalue;
 
 /// Runtime state shared across fibers for a single embedder context.
@@ -9,6 +10,8 @@ pub struct ElaraState {
     pub alloc: GcAllocator,
     pub all_objects: *mut GcHeader,
     pub strings: InternPool,
+    /// Fiber currently executing inside the VM (null when idle).
+    pub current_fiber: *mut ObjFiber,
     /// Interned `"__index"` key for metatable lookup.
     pub mm_index: Value,
     /// Interned `"__newindex"` key for metatable lookup.
@@ -22,6 +25,8 @@ pub struct ElaraState {
     /// Ordered log of defer / `__close` hooks run by `close_upvalues_from` (test/host aid).
     pub close_hook_log: [Value; 8],
     pub close_hook_log_len: usize,
+    /// Last runtime error message (static) for host/test inspection.
+    pub last_error: Option<&'static str>,
     pub gas_remaining: i64,
     pub gas_limit: i64,
 }
@@ -52,6 +57,7 @@ impl ElaraState {
             alloc,
             all_objects,
             strings,
+            current_fiber: core::ptr::null_mut(),
             mm_index,
             mm_newindex,
             mm_add,
@@ -59,9 +65,16 @@ impl ElaraState {
             mm_close,
             close_hook_log: [Value::NIL; 8],
             close_hook_log_len: 0,
+            last_error: None,
             gas_remaining,
             gas_limit,
         }
+    }
+
+    /// Records a static runtime error message and returns [`ElaraStatus::ErrRuntime`].
+    pub fn runtime_error(&mut self, msg: &'static str) -> crate::vm::status::ElaraStatus {
+        self.last_error = Some(msg);
+        crate::vm::status::ElaraStatus::ErrRuntime
     }
 
     /// Write barrier placeholder for closed upvalues (full GC lands later).
