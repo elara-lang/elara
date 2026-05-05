@@ -47,10 +47,12 @@ pub struct ObjFiber {
     /// Parent fiber that called `fiber.resume` (null for the root).
     pub caller: *mut ObjFiber,
     pub status: FiberStatus,
-    /// Caller's destination register base when this fiber yields.
+    /// Caller's destination register base when this fiber yields / returns.
     pub yield_dest_base: u32,
-    /// Caller's expected result count when this fiber yields.
+    /// Caller's expected result count when this fiber yields / returns.
     pub yield_expected_results: u16,
+    /// Absolute stack index where resumed values are written after `OP_YIELD`.
+    pub resume_slot: u32,
     /// Last unhandled runtime error value carried by this fiber.
     pub error_val: Value,
     /// Intrusive GC gray-stack link.
@@ -113,6 +115,7 @@ impl ObjFiber {
                     status: FiberStatus::Suspended,
                     yield_dest_base: 0,
                     yield_expected_results: 0,
+                    resume_slot: 0,
                     error_val: Value::NIL,
                     gclist: core::ptr::null_mut(),
                     close_slots: core::ptr::null_mut(),
