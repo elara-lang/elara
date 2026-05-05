@@ -27,6 +27,8 @@ pub struct ElaraState {
     pub close_hook_log_len: usize,
     /// Last runtime error message (static) for host/test inspection.
     pub last_error: Option<&'static str>,
+    /// When true, child-fiber errors are caught by `fiber.try_resume`.
+    pub try_resume_mode: bool,
     pub gas_remaining: i64,
     pub gas_limit: i64,
 }
@@ -66,6 +68,7 @@ impl ElaraState {
             close_hook_log: [Value::NIL; 8],
             close_hook_log_len: 0,
             last_error: None,
+            try_resume_mode: false,
             gas_remaining,
             gas_limit,
         }
