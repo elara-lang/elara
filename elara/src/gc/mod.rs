@@ -1,8 +1,13 @@
 //! Garbage collection, host memory allocator gateway, and write barriers.
 
 pub mod alloc;
+pub mod mark;
+pub mod state;
+pub mod sweep;
 
 pub use alloc::{ElaraAllocFn, GcAllocator, default_alloc_fn};
+pub use state::{GcPhase, GcState};
+pub use sweep::{gc_collect, gc_step};
 
 pub const GC_WHITE0: u8 = 0;
 pub const GC_WHITE1: u8 = 1;

@@ -1,6 +1,6 @@
 //! Minimal VM host state (gas + allocator + string pool) for the dispatch loop.
 
-use crate::gc::GcAllocator;
+use crate::gc::{GC_FIXED, GcAllocator, GcState};
 use crate::value::{GcHeader, InternPool, ObjType, Value};
 use crate::vm::fiber::ObjFiber;
 use crate::vm::upvalue::ObjUpvalue;
@@ -10,6 +10,8 @@ pub struct ElaraState {
     pub alloc: GcAllocator,
     pub all_objects: *mut GcHeader,
     pub strings: InternPool,
+    /// Incremental tri-color garbage collector control block.
+    pub gc: GcState,
     /// Fiber currently executing inside the VM (null when idle).
     pub current_fiber: *mut ObjFiber,
     /// Interned `"__index"` key for metatable lookup.
@@ -55,10 +57,19 @@ impl ElaraState {
         let mm_add = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__add");
         let mm_call = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__call");
         let mm_close = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__close");
+        mark_fixed(mm_index);
+        mark_fixed(mm_newindex);
+        mark_fixed(mm_add);
+        mark_fixed(mm_call);
+        mark_fixed(mm_close);
+        let mut gc = GcState::new();
+        gc.all_objects = all_objects;
+        gc.bytes_allocated = alloc.bytes_allocated;
         Self {
             alloc,
             all_objects,
             strings,
+            gc,
             current_fiber: core::ptr::null_mut(),
             mm_index,
             mm_newindex,
@@ -114,4 +125,12 @@ fn intern_mm(
         .new_string(alloc, all_objects, 0, bytes)
         .expect("intern metamethod name");
     Value::from_obj(s.cast(), ObjType::String)
+}
+
+fn mark_fixed(v: Value) {
+    if v.is_obj() {
+        unsafe {
+            (*v.as_obj()).gc_color = GC_FIXED;
+        }
+    }
 }

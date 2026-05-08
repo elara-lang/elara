@@ -131,6 +131,41 @@ impl InternPool {
         self.count
     }
 
+    /// Returns the open-addressed bucket capacity (`0` when empty).
+    #[inline]
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the string pointer at bucket `idx`, or null.
+    ///
+    /// # Safety
+    ///
+    /// `idx` must be `< capacity()` when `capacity() > 0`.
+    #[inline]
+    #[must_use]
+    pub unsafe fn bucket(&self, idx: usize) -> *mut ObjString {
+        debug_assert!(idx < self.capacity);
+        unsafe { *self.buckets.add(idx) }
+    }
+
+    /// Clears bucket `idx` after the string has been freed by the GC, decrementing `count`.
+    ///
+    /// # Safety
+    ///
+    /// `idx` must be `< capacity()` and the previous occupant must already be freed.
+    #[inline]
+    pub unsafe fn clear_bucket(&mut self, idx: usize) {
+        debug_assert!(idx < self.capacity);
+        unsafe {
+            if !(*self.buckets.add(idx)).is_null() {
+                *self.buckets.add(idx) = core::ptr::null_mut();
+                self.count = self.count.saturating_sub(1);
+            }
+        }
+    }
+
     /// Allocates or interns `bytes` according to the Dual-Tier string rules:
     /// - If `bytes.len() <= ELARA_SHORT_STR_MAX` (64), interns in `self` (`STR_FLAG_INTERNED | STR_FLAG_HAS_HASH`).
     /// - If `bytes.len() > ELARA_SHORT_STR_MAX`, allocates a non-interned Long String on `all_objects`
