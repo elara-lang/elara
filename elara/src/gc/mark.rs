@@ -37,10 +37,16 @@ pub unsafe fn shade_object(gc: &mut GcState, obj: *mut GcHeader) {
     }
 }
 
+/// Weak-key bit in table `__mode`.
+pub const WEAK_KEYS: u8 = 1;
+/// Weak-value bit in table `__mode`.
+pub const WEAK_VALUES: u8 = 2;
+
 /// Marks VM roots and enters [`GcPhase::Propagate`].
 pub unsafe fn mark_roots(state: &mut ElaraState) {
     let gc = &mut state.gc;
     gc.gray_stack.clear();
+    gc.weak_list.clear();
     gc.gray_head = core::ptr::null_mut();
     gc.gray_again = core::ptr::null_mut();
     gc.weak_tables = core::ptr::null_mut();
@@ -50,6 +56,7 @@ pub unsafe fn mark_roots(state: &mut ElaraState) {
     shade_value(gc, state.mm_add);
     shade_value(gc, state.mm_call);
     shade_value(gc, state.mm_close);
+    shade_value(gc, state.mm_mode);
 
     if !state.current_fiber.is_null() {
         shade_object(gc, state.current_fiber.cast::<GcHeader>());
@@ -72,12 +79,11 @@ pub unsafe fn propagate_step(state: &mut ElaraState, work_budget: usize) -> usiz
     work
 }
 
-/// Atomic phase: drain gray_again, rescan current fiber, flip white, start string sweep.
+/// Atomic phase: drain gray_again, clear weak entries, flip white, start string sweep.
 pub unsafe fn atomic_phase(state: &mut ElaraState) {
     // Drain barrier-dirtied tables.
     while !state.gc.gray_again.is_null() {
         let obj = state.gc.gray_again;
-        // Tables store gray_again link in `gclist`.
         let table = obj.cast::<ObjTable>();
         state.gc.gray_again = (*table).gclist;
         (*table).gclist = core::ptr::null_mut();
@@ -97,11 +103,16 @@ pub unsafe fn atomic_phase(state: &mut ElaraState) {
         mark_fiber_stack(state, state.current_fiber);
     }
 
+    // Clear weak entries whose weak key/value is still unmarked (current white).
+    clear_weak_tables(state);
+
     // Flip whites: former current_white becomes garbage.
     state.gc.current_white ^= 1;
     state.gc.string_sweep_idx = 0;
     state.gc.sweep_cursor = &mut state.all_objects;
     state.gc.phase = GcPhase::SweepString;
+    state.gc.weak_list.clear();
+    state.gc.weak_tables = core::ptr::null_mut();
 }
 
 unsafe fn traverse_object(state: &mut ElaraState, obj: *mut GcHeader) -> usize {
@@ -123,7 +134,16 @@ unsafe fn traverse_table(state: &mut ElaraState, table: *mut ObjTable) -> usize 
     if !t.metatable.is_null() {
         shade_object(&mut state.gc, t.metatable.cast());
     }
-    if !t.array.is_null() {
+    let mode = weak_mode(state, t);
+    if mode != 0 {
+        state.gc.weak_list.push(table);
+        state.gc.weak_tables = table;
+    }
+
+    let weak_v = (mode & WEAK_VALUES) != 0;
+    let weak_k = (mode & WEAK_KEYS) != 0;
+
+    if !t.array.is_null() && !weak_v {
         for i in 0..t.array_capacity as usize {
             shade_value(&mut state.gc, *t.array.add(i));
         }
@@ -132,8 +152,13 @@ unsafe fn traverse_table(state: &mut ElaraState, table: *mut ObjTable) -> usize 
     if !t.entries.is_null() {
         for i in 0..hash_cap {
             let e = *t.entries.add(i);
-            if !e.key.is_nil() {
+            if e.key.is_nil() {
+                continue;
+            }
+            if !weak_k {
                 shade_value(&mut state.gc, e.key);
+            }
+            if !weak_v {
                 shade_value(&mut state.gc, e.value);
             }
         }
@@ -141,6 +166,80 @@ unsafe fn traverse_table(state: &mut ElaraState, table: *mut ObjTable) -> usize 
     size_of::<ObjTable>()
         + (t.array_capacity as usize) * size_of::<Value>()
         + hash_cap * size_of::<crate::value::table::MapEntry>()
+}
+
+unsafe fn weak_mode(state: &ElaraState, t: &ObjTable) -> u8 {
+    if t.metatable.is_null() {
+        return 0;
+    }
+    let mode_val = (*t.metatable).get(state.mm_mode);
+    if !mode_val.is_obj_type(ObjType::String) {
+        return 0;
+    }
+    let s = &*mode_val.as_obj().cast::<ObjString>();
+    let bytes = s.as_bytes();
+    let mut mode = 0u8;
+    if bytes.contains(&b'k') {
+        mode |= WEAK_KEYS;
+    }
+    if bytes.contains(&b'v') {
+        mode |= WEAK_VALUES;
+    }
+    mode
+}
+
+unsafe fn is_dead_white(state: &ElaraState, v: Value) -> bool {
+    if !v.is_obj() {
+        return false;
+    }
+    let c = (*v.as_obj()).gc_color;
+    c != GC_FIXED && state.gc.is_current_white(c)
+}
+
+unsafe fn clear_weak_tables(state: &mut ElaraState) {
+    let tables: Vec<*mut ObjTable> = state.gc.weak_list.clone();
+    for table in tables {
+        if table.is_null() {
+            continue;
+        }
+        let mode = weak_mode(state, &*table);
+        if mode == 0 {
+            continue;
+        }
+        let weak_k = (mode & WEAK_KEYS) != 0;
+        let weak_v = (mode & WEAK_VALUES) != 0;
+        let t = &mut *table;
+
+        if weak_v && !t.array.is_null() {
+            for i in 0..t.array_capacity as usize {
+                let v = *t.array.add(i);
+                if is_dead_white(state, v) {
+                    *t.array.add(i) = Value::NIL;
+                }
+            }
+        }
+
+        if t.entries.is_null() {
+            continue;
+        }
+        let hash_cap = t.hash_capacity();
+        // Collect indices to delete (mutating while iterating Robin Hood needs care).
+        let mut to_clear: Vec<Value> = Vec::new();
+        for i in 0..hash_cap as usize {
+            let e = *t.entries.add(i);
+            if e.key.is_nil() {
+                continue;
+            }
+            let drop_k = weak_k && is_dead_white(state, e.key);
+            let drop_v = weak_v && is_dead_white(state, e.value);
+            if drop_k || drop_v {
+                to_clear.push(e.key);
+            }
+        }
+        for key in to_clear {
+            let _ = t.set(&mut state.alloc, key, Value::NIL);
+        }
+    }
 }
 
 unsafe fn traverse_closure(state: &mut ElaraState, closure: *mut ObjClosure) -> usize {

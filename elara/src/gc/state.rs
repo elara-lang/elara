@@ -45,6 +45,8 @@ pub struct GcState {
     pub generational_mode: bool,
     /// Non-intrusive gray stack for object types without a `gclist` field.
     pub(crate) gray_stack: Vec<*mut GcHeader>,
+    /// Reachable weak tables discovered during Propagate (processed in Atomic).
+    pub(crate) weak_list: Vec<*mut ObjTable>,
 }
 
 impl Default for GcState {
@@ -76,6 +78,7 @@ impl GcState {
             pause_budget_us: 500,
             generational_mode: false,
             gray_stack: Vec::new(),
+            weak_list: Vec::new(),
         }
     }
 
