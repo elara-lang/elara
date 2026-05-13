@@ -100,6 +100,9 @@ pub unsafe fn op_settab(
     }
     t.set(&mut state.alloc, key, val)
         .map_err(|_| ElaraStatus::ErrRuntime)?;
+    unsafe {
+        crate::gc::barrier::barrier_table_write(state, t as *mut ObjTable, key, val);
+    }
     Ok(None)
 }
 
@@ -196,11 +199,22 @@ pub unsafe fn op_setfield(
                 let entry = unsafe { &mut *t.entries.add(slot as usize) };
                 if entry.key.0 == key.0 {
                     entry.value = val;
+                    unsafe {
+                        crate::gc::barrier::barrier_table_write(
+                            state,
+                            t as *mut ObjTable,
+                            key,
+                            val,
+                        );
+                    }
                     return Ok(None);
                 }
             }
             t.set(&mut state.alloc, key, val)
                 .map_err(|_| ElaraStatus::ErrRuntime)?;
+            unsafe {
+                crate::gc::barrier::barrier_table_write(state, t as *mut ObjTable, key, val);
+            }
             if let Some(found) = t.find_hash_index(key)
                 && found <= u32::from(u16::MAX)
             {
@@ -213,6 +227,9 @@ pub unsafe fn op_setfield(
         if !t.get(key).is_nil() {
             t.set(&mut state.alloc, key, val)
                 .map_err(|_| ElaraStatus::ErrRuntime)?;
+            unsafe {
+                crate::gc::barrier::barrier_table_write(state, t as *mut ObjTable, key, val);
+            }
             return Ok(None);
         }
     }
@@ -222,9 +239,10 @@ pub unsafe fn op_setfield(
         NewIndexOutcome::Fallback => {
             if table.is_obj_type(ObjType::Table) {
                 unsafe {
-                    (*table.as_obj().cast::<ObjTable>())
-                        .set(&mut state.alloc, key, val)
+                    let t = table.as_obj().cast::<ObjTable>();
+                    (*t).set(&mut state.alloc, key, val)
                         .map_err(|_| ElaraStatus::ErrRuntime)?;
+                    crate::gc::barrier::barrier_table_write(state, t, key, val);
                 }
                 Ok(None)
             } else {
@@ -281,9 +299,14 @@ pub unsafe fn op_seti(
         return Err(ElaraStatus::ErrRuntime);
     }
     let t = unsafe { &mut *table.as_obj().cast::<ObjTable>() };
+    let key = Value::from_i48(i64::from(b));
     let val = unsafe { *base.add(c as usize) };
-    t.set(&mut state.alloc, Value::from_i48(i64::from(b)), val)
-        .map_err(|_| ElaraStatus::ErrRuntime)
+    t.set(&mut state.alloc, key, val)
+        .map_err(|_| ElaraStatus::ErrRuntime)?;
+    unsafe {
+        crate::gc::barrier::barrier_table_write(state, t as *mut ObjTable, key, val);
+    }
+    Ok(())
 }
 
 /// `OP_SETLIST A, B, C` — batch `R[A][C*64 + i] = R[A+1+i]` for `i in 0..B`.

@@ -24,6 +24,8 @@ pub struct ElaraState {
     pub mm_call: Value,
     /// Interned `"__close"` key for `defer` resource cleanup.
     pub mm_close: Value,
+    /// Interned `"__mode"` key for weak-table metatable mode.
+    pub mm_mode: Value,
     /// Ordered log of defer / `__close` hooks run by `close_upvalues_from` (test/host aid).
     pub close_hook_log: [Value; 8],
     pub close_hook_log_len: usize,
@@ -57,11 +59,13 @@ impl ElaraState {
         let mm_add = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__add");
         let mm_call = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__call");
         let mm_close = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__close");
+        let mm_mode = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__mode");
         mark_fixed(mm_index);
         mark_fixed(mm_newindex);
         mark_fixed(mm_add);
         mark_fixed(mm_call);
         mark_fixed(mm_close);
+        mark_fixed(mm_mode);
         let mut gc = GcState::new();
         gc.all_objects = all_objects;
         gc.bytes_allocated = alloc.bytes_allocated;
@@ -76,6 +80,7 @@ impl ElaraState {
             mm_add,
             mm_call,
             mm_close,
+            mm_mode,
             close_hook_log: [Value::NIL; 8],
             close_hook_log_len: 0,
             last_error: None,
@@ -91,9 +96,15 @@ impl ElaraState {
         crate::vm::status::ElaraStatus::ErrRuntime
     }
 
-    /// Write barrier placeholder for closed upvalues (full GC lands later).
+    /// Forward write barrier for upvalue stores.
     #[inline]
-    pub fn gc_barrier_upvalue(&mut self, _upval: *mut ObjUpvalue, _val: Value) {}
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn gc_barrier_upvalue(&mut self, upval: *mut ObjUpvalue, val: Value) {
+        // SAFETY: callers pass a live upvalue from the open/closed upvalue paths.
+        unsafe {
+            crate::gc::barrier::barrier_upvalue(self, upval, val);
+        }
+    }
 
     /// Clears the defer / `__close` observation log.
     pub fn clear_close_hook_log(&mut self) {
