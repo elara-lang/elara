@@ -2,6 +2,7 @@
 
 use crate::gc::{GC_FIXED, GcAllocator, GcState};
 use crate::value::{GcHeader, InternPool, ObjType, Value};
+use crate::vm::error::ErrorState;
 use crate::vm::fiber::ObjFiber;
 use crate::vm::upvalue::ObjUpvalue;
 
@@ -12,6 +13,8 @@ pub struct ElaraState {
     pub strings: InternPool,
     /// Incremental tri-color garbage collector control block.
     pub gc: GcState,
+    /// Pre-allocated stack-trace / OOM error buffers.
+    pub error: ErrorState,
     /// Fiber currently executing inside the VM (null when idle).
     pub current_fiber: *mut ObjFiber,
     /// Interned `"__index"` key for metatable lookup.
@@ -69,11 +72,15 @@ impl ElaraState {
         let mut gc = GcState::new();
         gc.all_objects = all_objects;
         gc.bytes_allocated = alloc.bytes_allocated;
+        let error = ErrorState::new(&mut strings, &mut alloc, &mut all_objects);
+        gc.all_objects = all_objects;
+        gc.bytes_allocated = alloc.bytes_allocated;
         Self {
             alloc,
             all_objects,
             strings,
             gc,
+            error,
             current_fiber: core::ptr::null_mut(),
             mm_index,
             mm_newindex,
@@ -93,6 +100,7 @@ impl ElaraState {
     /// Records a static runtime error message and returns [`ElaraStatus::ErrRuntime`].
     pub fn runtime_error(&mut self, msg: &'static str) -> crate::vm::status::ElaraStatus {
         self.last_error = Some(msg);
+        self.error.last_status = crate::vm::status::ElaraStatus::ErrRuntime;
         crate::vm::status::ElaraStatus::ErrRuntime
     }
 

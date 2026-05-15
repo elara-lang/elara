@@ -4,6 +4,7 @@ mod arith;
 mod call;
 pub mod closure;
 pub mod dispatch;
+pub mod error;
 pub mod fiber;
 pub mod frame;
 mod meta;
@@ -15,6 +16,10 @@ pub mod upvalue;
 
 pub use closure::ObjClosure;
 pub use dispatch::execute;
+pub use error::{
+    ELARA_MAX_TRACE_FRAMES, ErrorState, TraceEntry, capture_stack_trace, frame_pc_index,
+    record_oom, trace_entry_from_frame,
+};
 pub use fiber::{
     ELARA_MAX_CALL_DEPTH, ELARA_MAX_STACK_SLOTS, ELARA_MIN_STACK_SLOTS, FiberStatus, ObjFiber,
 };
