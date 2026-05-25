@@ -6,11 +6,12 @@ use crate::compiler::opcode::Instruction;
 use crate::value::{ObjString, ObjType, Value};
 use crate::vm::closure::ObjClosure;
 use crate::vm::fiber::ObjFiber;
-use crate::vm::frame::CallFrame;
+use crate::vm::frame::{CallFrame, FRAME_FLAG_PCALL};
 use crate::vm::state::ElaraState;
 use crate::vm::status::ElaraStatus;
 
 /// Saved / restored register window after a call transition.
+#[derive(Debug)]
 pub struct RegWindow {
     pub base: *mut Value,
     pub k: *const Value,
@@ -132,28 +133,56 @@ pub unsafe fn op_return(
 
     let dst = frame.func_idx;
     let want = frame.num_results;
-    let copy_n = if want == 0xFFFF {
-        nret
-    } else {
-        nret.min(u32::from(want))
-    };
-
-    for i in 0..copy_n {
-        unsafe {
-            *fiber.stack.add((dst + i) as usize) = *base.add(a as usize + i as usize);
-        }
-    }
-    if want != 0xFFFF {
-        for i in copy_n..u32::from(want) {
+    let n_out = if (frame.flags & FRAME_FLAG_PCALL) != 0 {
+        // Protected call: write `true` at dest, then payload returns at dest+1..
+        let max_payload = if want == 0xFFFF {
+            nret
+        } else {
+            u32::from(want).saturating_sub(1)
+        };
+        let payload = nret.min(max_payload);
+        for i in (0..payload).rev() {
             unsafe {
-                *fiber.stack.add((dst + i) as usize) = Value::NIL;
+                *fiber.stack.add((dst + 1 + i) as usize) = *base.add(a as usize + i as usize);
             }
         }
-        fiber.open_top = dst + u32::from(want);
+        for i in payload..max_payload {
+            unsafe {
+                *fiber.stack.add((dst + 1 + i) as usize) = Value::NIL;
+            }
+        }
+        unsafe {
+            *fiber.stack.add(dst as usize) = Value::TRUE;
+        }
+        if want == 0xFFFF {
+            payload + 1
+        } else {
+            u32::from(want).max(1)
+        }
     } else {
-        fiber.open_top = dst + nret;
-    }
+        let copy_n = if want == 0xFFFF {
+            nret
+        } else {
+            nret.min(u32::from(want))
+        };
+        for i in 0..copy_n {
+            unsafe {
+                *fiber.stack.add((dst + i) as usize) = *base.add(a as usize + i as usize);
+            }
+        }
+        if want != 0xFFFF {
+            for i in copy_n..u32::from(want) {
+                unsafe {
+                    *fiber.stack.add((dst + i) as usize) = Value::NIL;
+                }
+            }
+            u32::from(want)
+        } else {
+            nret
+        }
+    };
 
+    fiber.open_top = dst + n_out;
     fiber.frame_count = fiber.frame_count.saturating_sub(1);
     state.gas_remaining = fuel;
 
