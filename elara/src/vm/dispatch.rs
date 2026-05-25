@@ -22,6 +22,7 @@ use crate::vm::tab::{
     op_forin, op_forloop, op_forprep, op_getfield, op_geti, op_gettab, op_len, op_newtable,
     op_range, op_self, op_setfield, op_seti, op_setlist, op_settab,
 };
+use crate::vm::unwind::{CatchOutcome, unwind_fiber};
 use crate::vm::upvalue::{op_close, op_closure, op_getupval, op_setupval};
 
 /// Executes `fiber` until return from the bottom frame, yield, or error.
@@ -61,9 +62,13 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
         if gas_limited {
             fuel -= 1;
             if fuel <= 0 {
-                state.gas_remaining = fuel;
-                frame.pc = pc;
-                return ElaraStatus::ErrGas;
+                let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, ElaraStatus::ErrGas);
+                if state.resume_after_catch {
+                    state.resume_after_catch = false;
+                    reload_after_catch(fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc);
+                    continue;
+                }
+                return st;
             }
         }
 
@@ -72,14 +77,24 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
             None => {
                 state.gas_remaining = fuel;
                 frame.pc = pc;
-                return finish_err_fiber(
-                    state,
-                    fiber_ptr,
-                    frame,
-                    pc,
-                    fuel,
-                    ElaraStatus::ErrRuntime,
-                );
+                {
+                    let st = finish_err_fiber(
+                        state,
+                        fiber_ptr,
+                        frame,
+                        pc,
+                        fuel,
+                        ElaraStatus::ErrRuntime,
+                    );
+                    if state.resume_after_catch {
+                        state.resume_after_catch = false;
+                        reload_after_catch(
+                            fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                        );
+                        continue;
+                    }
+                    return st;
+                }
             }
         };
 
@@ -120,7 +135,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
             }
             OpCode::Close => {
                 if let Err(e) = unsafe { op_close(state, fiber, frame, inst.a()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Add => {
@@ -133,7 +158,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         Ok(w) => {
                             apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                         }
-                        Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                        Err(e) => {
+                            let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                            if state.resume_after_catch {
+                                state.resume_after_catch = false;
+                                reload_after_catch(
+                                    fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                                );
+                                continue;
+                            }
+                            return st;
+                        }
                     },
                 }
             }
@@ -147,7 +182,7 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     None => match as_num(vb) {
                         Some(f) => Value::from_f64(f + sc as f64),
                         None => {
-                            return finish_err_fiber(
+                            let st = finish_err_fiber(
                                 state,
                                 fiber_ptr,
                                 frame,
@@ -155,6 +190,14 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                                 fuel,
                                 ElaraStatus::ErrRuntime,
                             );
+                            if state.resume_after_catch {
+                                state.resume_after_catch = false;
+                                reload_after_catch(
+                                    fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                                );
+                                continue;
+                            }
+                            return st;
                         }
                     },
                 };
@@ -162,47 +205,137 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
             }
             OpCode::Sub => {
                 if let Err(e) = bin_op(base, k, inst, bin_sub) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Mul => {
                 if let Err(e) = bin_op(base, k, inst, bin_mul) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Div => {
                 if let Err(e) = bin_op(base, k, inst, bin_div) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Mod => {
                 if let Err(e) = bin_op(base, k, inst, bin_mod) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::BAnd => {
                 if let Err(e) = bin_op(base, k, inst, bin_band) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::BOr => {
                 if let Err(e) = bin_op(base, k, inst, bin_bor) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::BXor => {
                 if let Err(e) = bin_op(base, k, inst, bin_bxor) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Shl => {
                 if let Err(e) = bin_op(base, k, inst, bin_shl) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Shr => {
                 if let Err(e) = bin_op(base, k, inst, bin_shr) {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Unm => {
@@ -210,7 +343,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 let b = inst.b() as usize;
                 match un_neg(unsafe { *base.add(b) }) {
                     Ok(v) => unsafe { *base.add(a) = v },
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::BNot => {
@@ -218,7 +361,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 let b = inst.b() as usize;
                 match un_bnot(unsafe { *base.add(b) }) {
                     Ok(v) => unsafe { *base.add(a) = v },
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Not => {
@@ -231,19 +384,49 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 // SAFETY: fused compare consumes the trailing OP_JMP.
                 pc = match unsafe { fused_cmp(base, k, pc, inst, |vb, vc| Ok(vb.val_equal(vc))) } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::Lt => {
                 pc = match unsafe { fused_cmp(base, k, pc, inst, cmp_lt) } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::Le => {
                 pc = match unsafe { fused_cmp(base, k, pc, inst, cmp_le) } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::EqI => {
@@ -253,7 +436,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     })
                 } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::LtI => {
@@ -263,7 +456,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     })
                 } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::LeI => {
@@ -273,7 +476,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     })
                 } {
                     Ok(p) => p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 };
             }
             OpCode::Test => {
@@ -286,16 +499,39 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 if sj <= 0 && gas_limited {
                     fuel -= 1;
                     if fuel <= 0 {
-                        state.gas_remaining = fuel;
-                        frame.pc = pc;
-                        return ElaraStatus::ErrGas;
+                        let st = finish_err_fiber(
+                            state,
+                            fiber_ptr,
+                            frame,
+                            pc,
+                            fuel,
+                            ElaraStatus::ErrGas,
+                        );
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
                     }
                 }
                 pc = unsafe { pc.offset(sj as isize) };
             }
             OpCode::NewTable => {
                 if let Err(e) = unsafe { op_newtable(state, base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::GetTab => {
@@ -306,7 +542,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Ok(None) => {}
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::SetTab => {
@@ -319,17 +565,47 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Ok(None) => {}
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::GetI => {
                 if let Err(e) = unsafe { op_geti(base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::SetI => {
                 if let Err(e) = unsafe { op_seti(state, base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::GetField => {
@@ -338,7 +614,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Ok(None) => {}
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::SetField => {
@@ -347,12 +633,32 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Ok(None) => {}
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::SetList => {
                 if let Err(e) = unsafe { op_setlist(state, base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::SelfMethod => {
@@ -361,12 +667,32 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
                     Ok(None) => {}
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Len => {
                 if let Err(e) = unsafe { op_len(base, inst.a(), inst.b()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::ForPrep => {
@@ -375,23 +701,63 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
             OpCode::ForLoop => {
                 match unsafe { op_forloop(base, pc, inst, gas_limited, &mut fuel) } {
                     Ok(p) => pc = p,
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::ForIn => match unsafe { op_forin(base, pc, inst) } {
                 Ok(p) => pc = p,
-                Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                Err(e) => {
+                    let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    if state.resume_after_catch {
+                        state.resume_after_catch = false;
+                        reload_after_catch(
+                            fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                        );
+                        continue;
+                    }
+                    return st;
+                }
             },
             OpCode::Range => {
                 if let Err(e) = unsafe { op_range(state, base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Closure => {
                 if let Err(e) =
                     unsafe { op_closure(state, fiber, frame, base, inst.a(), u32::from(inst.bx())) }
                 {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Call => {
@@ -400,7 +766,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     Ok(w) => {
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
                     }
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::TailCall => {
@@ -411,7 +787,17 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         ic = unsafe { (*(*frame.closure).proto).ic_slots };
                         pc = w.pc;
                     }
-                    Err(e) => return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e),
+                    Err(e) => {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             OpCode::Return => {
@@ -471,24 +857,42 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         continue;
                     }
                     Err(e) => {
-                        return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
                     }
                 }
             }
             OpCode::ConcatN => {
                 if let Err(e) = unsafe { op_concat_n(state, base, inst.a(), inst.b(), inst.c()) } {
-                    return finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    {
+                        let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                        if state.resume_after_catch {
+                            state.resume_after_catch = false;
+                            reload_after_catch(
+                                fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                            );
+                            continue;
+                        }
+                        return st;
+                    }
                 }
             }
             _ => {
-                return finish_err_fiber(
-                    state,
-                    fiber_ptr,
-                    frame,
-                    pc,
-                    fuel,
-                    ElaraStatus::ErrRuntime,
-                );
+                let st =
+                    finish_err_fiber(state, fiber_ptr, frame, pc, fuel, ElaraStatus::ErrRuntime);
+                if state.resume_after_catch {
+                    state.resume_after_catch = false;
+                    reload_after_catch(fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc);
+                    continue;
+                }
+                return st;
             }
         }
     }
@@ -601,6 +1005,24 @@ unsafe fn reload_fiber<'a>(
 }
 
 #[inline]
+unsafe fn reload_after_catch(
+    fiber_ptr: *mut ObjFiber,
+    frame: &mut &mut crate::vm::frame::CallFrame,
+    base: &mut *mut Value,
+    k: &mut *const Value,
+    ic: &mut *mut u16,
+    pc: &mut *const Instruction,
+) {
+    let fiber = &mut *fiber_ptr;
+    debug_assert!(fiber.frame_count > 0);
+    *frame = &mut *fiber.frames.add(fiber.frame_count as usize - 1);
+    *base = fiber.stack.add(frame.base_idx as usize);
+    *k = (*(*frame.closure).proto).constants.cast_const();
+    *ic = (*(*frame.closure).proto).ic_slots;
+    *pc = frame.pc;
+}
+
+#[inline]
 unsafe fn finish_err_fiber(
     state: &mut ElaraState,
     fiber_ptr: *mut ObjFiber,
@@ -611,15 +1033,33 @@ unsafe fn finish_err_fiber(
 ) -> ElaraStatus {
     state.gas_remaining = fuel;
     frame.pc = pc;
-    if matches!(
-        err,
-        ElaraStatus::ErrRuntime | ElaraStatus::ErrGas | ElaraStatus::ErrOom
-    ) && !(*fiber_ptr).caller.is_null()
-    {
-        return handle_fiber_error(state, fiber_ptr, err);
-    }
     if matches!(err, ElaraStatus::ErrRuntime) && state.last_error.is_none() {
         state.last_error = Some("runtime error");
     }
-    err
+
+    let msg = if !state.error.last_message.is_nil() {
+        state.error.last_message
+    } else if err == ElaraStatus::ErrOom {
+        state.error.oom_value()
+    } else {
+        state.error.assert_failed_value()
+    };
+
+    match unwind_fiber(state, fiber_ptr, err, msg) {
+        CatchOutcome::Resume(_w) => {
+            state.resume_after_catch = true;
+            ElaraStatus::Ok
+        }
+        CatchOutcome::Propagate(ElaraStatus::Ok) => ElaraStatus::Ok,
+        CatchOutcome::Propagate(e) => {
+            if matches!(
+                e,
+                ElaraStatus::ErrRuntime | ElaraStatus::ErrGas | ElaraStatus::ErrOom
+            ) && !(*fiber_ptr).caller.is_null()
+            {
+                return handle_fiber_error(state, fiber_ptr, e);
+            }
+            e
+        }
+    }
 }

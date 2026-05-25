@@ -12,6 +12,7 @@ pub mod sched;
 pub mod state;
 pub mod status;
 mod tab;
+pub mod unwind;
 pub mod upvalue;
 
 pub use closure::ObjClosure;
@@ -30,6 +31,9 @@ pub use sched::{
 };
 pub use state::ElaraState;
 pub use status::ElaraStatus;
+pub use unwind::{
+    CatchOutcome, intrinsic_assert, intrinsic_panic, push_pcall_frame, raise_runtime, unwind_fiber,
+};
 pub use upvalue::{
     ObjUpvalue, capture_upvalue, close_upvalues_from, fill_upvalues, rebase_open_upvalues,
 };

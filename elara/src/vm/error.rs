@@ -44,6 +44,7 @@ impl Default for TraceEntry {
 /// Pre-allocated error / stack-trace buffers owned by [`crate::vm::ElaraState`].
 pub struct ErrorState {
     pub oom_string: *mut ObjString,
+    pub assert_failed_string: *mut ObjString,
     pub trace_frames: [TraceEntry; ELARA_MAX_TRACE_FRAMES],
     pub trace_count: usize,
     pub last_status: ElaraStatus,
@@ -51,7 +52,7 @@ pub struct ErrorState {
 }
 
 impl ErrorState {
-    /// Pins a `GC_FIXED` `"Out of memory"` string and zeroes the trace buffer.
+    /// Pins `GC_FIXED` diagnostic strings and zeroes the trace buffer.
     pub fn new(
         strings: &mut InternPool,
         alloc: &mut GcAllocator,
@@ -60,11 +61,16 @@ impl ErrorState {
         let oom = strings
             .new_string(alloc, all_objects, GC_FIXED, b"Out of memory")
             .expect("pin Out of memory string");
+        let assert_failed = strings
+            .new_string(alloc, all_objects, GC_FIXED, b"Assertion failed")
+            .expect("pin Assertion failed string");
         unsafe {
             (*oom.as_ptr()).header.gc_color = GC_FIXED;
+            (*assert_failed.as_ptr()).header.gc_color = GC_FIXED;
         }
         Self {
             oom_string: oom.as_ptr(),
+            assert_failed_string: assert_failed.as_ptr(),
             trace_frames: [TraceEntry::default(); ELARA_MAX_TRACE_FRAMES],
             trace_count: 0,
             last_status: ElaraStatus::Ok,
@@ -77,6 +83,15 @@ impl ErrorState {
     pub fn oom_value(&self) -> Value {
         Value::from_obj(
             core::ptr::NonNull::new(self.oom_string.cast()).expect("oom pinned"),
+            ObjType::String,
+        )
+    }
+
+    /// Returns the pinned `"Assertion failed"` message as a [`Value`].
+    #[must_use]
+    pub fn assert_failed_value(&self) -> Value {
+        Value::from_obj(
+            core::ptr::NonNull::new(self.assert_failed_string.cast()).expect("assert pinned"),
             ObjType::String,
         )
     }

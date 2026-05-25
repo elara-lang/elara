@@ -36,6 +36,8 @@ pub struct ElaraState {
     pub last_error: Option<&'static str>,
     /// When true, child-fiber errors are caught by `fiber.try_resume`.
     pub try_resume_mode: bool,
+    /// Set by error unwinding when a `pcall` caught the error; dispatch reloads the caller.
+    pub(crate) resume_after_catch: bool,
     pub gas_remaining: i64,
     pub gas_limit: i64,
 }
@@ -92,6 +94,7 @@ impl ElaraState {
             close_hook_log_len: 0,
             last_error: None,
             try_resume_mode: false,
+            resume_after_catch: false,
             gas_remaining,
             gas_limit,
         }
