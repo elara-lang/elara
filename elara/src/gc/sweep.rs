@@ -6,6 +6,7 @@
 use core::mem::size_of;
 
 use crate::compiler::proto::ObjProto;
+use crate::ffi::{ObjNativeFn, ObjUserdata};
 use crate::gc::state::{GcPhase, GcState};
 use crate::gc::{GC_FIXED, GC_GEN_NEW, GC_GEN_OLD};
 use crate::value::nan::{GcHeader, ObjBoxedI64, ObjType};
@@ -126,11 +127,11 @@ unsafe fn free_object(state: &mut ElaraState, obj: *mut GcHeader) {
                 .alloc
                 .free_bytes(obj.cast::<u8>(), size_of::<ObjBoxedI64>());
         }
-        ObjType::Userdata | ObjType::NativeFn => {
-            // Headers only for now (no dedicated payloads in-tree yet).
-            state
-                .alloc
-                .free_bytes(obj.cast::<u8>(), size_of::<GcHeader>());
+        ObjType::Userdata => {
+            ObjUserdata::finalize_and_free(state, obj.cast());
+        }
+        ObjType::NativeFn => {
+            ObjNativeFn::free(state, obj.cast());
         }
     }
 }
