@@ -1,6 +1,7 @@
 //! Elara embeddable scripting language core library.
 
 pub mod compiler;
+pub mod ffi;
 pub mod gc;
 pub mod lexer;
 pub mod value;

@@ -6,6 +6,7 @@
 use core::mem::size_of;
 
 use crate::compiler::proto::ObjProto;
+use crate::ffi::ObjUserdata;
 use crate::gc::state::{GcPhase, GcState};
 use crate::gc::{GC_BLACK, GC_FIXED, GC_GRAY};
 use crate::value::nan::{GcHeader, ObjType, Value};
@@ -118,9 +119,8 @@ pub unsafe fn atomic_phase(state: &mut ElaraState) {
 unsafe fn traverse_object(state: &mut ElaraState, obj: *mut GcHeader) -> usize {
     (*obj).gc_color = GC_BLACK;
     match (*obj).obj_type {
-        ObjType::String | ObjType::BoxedI64 | ObjType::Userdata | ObjType::NativeFn => {
-            size_of::<ObjString>()
-        }
+        ObjType::String | ObjType::BoxedI64 | ObjType::NativeFn => size_of::<ObjString>(),
+        ObjType::Userdata => traverse_userdata(state, obj.cast()),
         ObjType::Table => traverse_table(state, obj.cast()),
         ObjType::Closure => traverse_closure(state, obj.cast()),
         ObjType::Proto => traverse_proto(state, obj.cast()),
@@ -166,6 +166,19 @@ unsafe fn traverse_table(state: &mut ElaraState, table: *mut ObjTable) -> usize 
     size_of::<ObjTable>()
         + (t.array_capacity as usize) * size_of::<Value>()
         + hash_cap * size_of::<crate::value::table::MapEntry>()
+}
+
+unsafe fn traverse_userdata(state: &mut ElaraState, ud: *mut ObjUserdata) -> usize {
+    let u = &*ud;
+    if !u.metatable.is_null() {
+        shade_object(&mut state.gc, u.metatable.cast());
+    }
+    if !u.desc.is_null()
+        && let Some(trace) = (*u.desc).trace
+    {
+        trace(state as *mut ElaraState, u.payload_ptr().cast());
+    }
+    ObjUserdata::alloc_size(u.size)
 }
 
 unsafe fn weak_mode(state: &ElaraState, t: &ObjTable) -> u8 {
