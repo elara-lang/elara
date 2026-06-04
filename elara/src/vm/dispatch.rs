@@ -1033,7 +1033,9 @@ unsafe fn finish_err_fiber(
 ) -> ElaraStatus {
     state.gas_remaining = fuel;
     frame.pc = pc;
-    if matches!(err, ElaraStatus::ErrRuntime) && state.last_error.is_none() {
+    if err == ElaraStatus::ErrGas {
+        state.last_error = Some(crate::ffi::sandbox::GAS_EXHAUSTED_MSG);
+    } else if matches!(err, ElaraStatus::ErrRuntime) && state.last_error.is_none() {
         state.last_error = Some("runtime error");
     }
 
