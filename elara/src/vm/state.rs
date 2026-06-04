@@ -1,7 +1,10 @@
 //! Minimal VM host state (gas + allocator + string pool) for the dispatch loop.
 
-use crate::gc::{GC_FIXED, GcAllocator, GcState};
-use crate::value::{GcHeader, InternPool, ObjType, Value};
+use core::ffi::c_void;
+
+use crate::ffi::config::{ElaraModuleLoaderFn, state_for_tests};
+use crate::gc::GcAllocator;
+use crate::value::{GcHeader, InternPool, ObjTable, Value};
 use crate::vm::error::ErrorState;
 use crate::vm::fiber::ObjFiber;
 use crate::vm::upvalue::ObjUpvalue;
@@ -12,7 +15,7 @@ pub struct ElaraState {
     pub all_objects: *mut GcHeader,
     pub strings: InternPool,
     /// Incremental tri-color garbage collector control block.
-    pub gc: GcState,
+    pub gc: crate::gc::GcState,
     /// Pre-allocated stack-trace / OOM error buffers.
     pub error: ErrorState,
     /// Fiber currently executing inside the VM (null when idle).
@@ -40,64 +43,29 @@ pub struct ElaraState {
     pub(crate) resume_after_catch: bool,
     pub gas_remaining: i64,
     pub gas_limit: i64,
+    /// Sandbox capability bitmask (`ELARA_CAP_*`).
+    pub capabilities: u32,
+    /// Global environment table (may be null before open completes).
+    pub globals: *mut ObjTable,
+    /// Optional host module loader.
+    pub module_loader: Option<ElaraModuleLoaderFn>,
+    pub module_loader_ud: *mut c_void,
 }
 
 impl ElaraState {
-    /// Creates a state with unlimited gas (`gas_limit == 0` disables the fuel check).
+    /// Creates a state with unlimited gas and full capabilities (test / internal default).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_gas_inner(i64::MAX / 4, 0)
+        state_for_tests()
     }
 
-    /// Creates a state with a hard instruction budget.
+    /// Creates a state with a hard instruction budget (full capabilities).
     #[must_use]
     pub fn with_gas(limit: i64) -> Self {
-        Self::with_gas_inner(limit, limit)
-    }
-
-    fn with_gas_inner(gas_remaining: i64, gas_limit: i64) -> Self {
-        let mut alloc = GcAllocator::new();
-        let mut all_objects = core::ptr::null_mut();
-        let mut strings = InternPool::new(0xC0FF_EE42);
-        let mm_index = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__index");
-        let mm_newindex = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__newindex");
-        let mm_add = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__add");
-        let mm_call = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__call");
-        let mm_close = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__close");
-        let mm_mode = intern_mm(&mut strings, &mut alloc, &mut all_objects, b"__mode");
-        mark_fixed(mm_index);
-        mark_fixed(mm_newindex);
-        mark_fixed(mm_add);
-        mark_fixed(mm_call);
-        mark_fixed(mm_close);
-        mark_fixed(mm_mode);
-        let mut gc = GcState::new();
-        gc.all_objects = all_objects;
-        gc.bytes_allocated = alloc.bytes_allocated;
-        let error = ErrorState::new(&mut strings, &mut alloc, &mut all_objects);
-        gc.all_objects = all_objects;
-        gc.bytes_allocated = alloc.bytes_allocated;
-        Self {
-            alloc,
-            all_objects,
-            strings,
-            gc,
-            error,
-            current_fiber: core::ptr::null_mut(),
-            mm_index,
-            mm_newindex,
-            mm_add,
-            mm_call,
-            mm_close,
-            mm_mode,
-            close_hook_log: [Value::NIL; 8],
-            close_hook_log_len: 0,
-            last_error: None,
-            try_resume_mode: false,
-            resume_after_catch: false,
-            gas_remaining,
-            gas_limit,
-        }
+        let mut s = state_for_tests();
+        s.gas_remaining = limit;
+        s.gas_limit = limit;
+        s
     }
 
     /// Records a static runtime error message and returns [`ElaraStatus::ErrRuntime`].
@@ -134,25 +102,5 @@ impl ElaraState {
 impl Default for ElaraState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn intern_mm(
-    strings: &mut InternPool,
-    alloc: &mut GcAllocator,
-    all_objects: &mut *mut GcHeader,
-    bytes: &[u8],
-) -> Value {
-    let s = strings
-        .new_string(alloc, all_objects, 0, bytes)
-        .expect("intern metamethod name");
-    Value::from_obj(s.cast(), ObjType::String)
-}
-
-fn mark_fixed(v: Value) {
-    if v.is_obj() {
-        unsafe {
-            (*v.as_obj()).gc_color = GC_FIXED;
-        }
     }
 }

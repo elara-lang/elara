@@ -280,5 +280,66 @@ pub unsafe fn call_or_metamethod(
             callable.as_obj().cast(),
         );
     }
+    if callable.is_obj_type(ObjType::NativeFn) {
+        return call_native(state, fiber, frame, base, pc, a, num_args, num_results);
+    }
     unsafe { try_call_metamethod(state, fiber, frame, base, pc, a, num_args, num_results) }
+}
+
+unsafe fn call_native(
+    state: &mut ElaraState,
+    fiber: &mut ObjFiber,
+    frame: &mut CallFrame,
+    base: *mut Value,
+    pc: *const crate::compiler::opcode::Instruction,
+    a: u8,
+    num_args: u32,
+    num_results: u16,
+) -> Result<RegWindow, ElaraStatus> {
+    frame.pc = pc;
+    let native = (*base.add(a as usize))
+        .as_obj()
+        .cast::<crate::ffi::ObjNativeFn>();
+    let argc = num_args.min(u32::from(u16::MAX)) as u16;
+    let args_ptr = base.add(a as usize + 1);
+    // Results overwrite the callable slot.
+    let max_results = if num_results == 0xFFFF {
+        16u16
+    } else {
+        num_results
+    };
+    let mut scratch = [Value::NIL; 16];
+    let n_scratch = max_results.min(16) as usize;
+    let mut ctx = crate::ffi::CallContext {
+        argc,
+        max_results: n_scratch as u16,
+        nresults: 0,
+        reserved: 0,
+        args: args_ptr,
+        results: scratch.as_mut_ptr(),
+        userdata: (*native).userdata,
+    };
+    let st = ((*native).func)(state as *mut ElaraState, &mut ctx);
+    if st != ElaraStatus::Ok {
+        return Err(st);
+    }
+    let n_out = if num_results == 0xFFFF {
+        ctx.nresults as u32
+    } else {
+        u32::from(num_results)
+    };
+    for (i, slot) in scratch.iter().enumerate().take(n_out as usize) {
+        let v = if i < ctx.nresults as usize {
+            *slot
+        } else {
+            Value::NIL
+        };
+        *base.add(a as usize + i) = v;
+    }
+    fiber.open_top = frame.base_idx + u32::from(a) + n_out;
+    Ok(RegWindow {
+        base: fiber.stack.add(frame.base_idx as usize),
+        k: (*(*frame.closure).proto).constants.cast_const(),
+        pc: frame.pc,
+    })
 }

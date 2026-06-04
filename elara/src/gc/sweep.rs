@@ -92,7 +92,8 @@ fn finish_sweep(state: &mut ElaraState) {
     state.gc.bytes_allocated = live;
 }
 
-unsafe fn free_object(state: &mut ElaraState, obj: *mut GcHeader) {
+/// Frees a single heap object (finalizers run for userdata). Used by the collector and host close.
+pub(crate) unsafe fn free_object(state: &mut ElaraState, obj: *mut GcHeader) {
     match (*obj).obj_type {
         ObjType::Table => {
             let t = &mut *obj.cast::<ObjTable>();
