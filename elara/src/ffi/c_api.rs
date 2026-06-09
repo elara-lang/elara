@@ -181,18 +181,33 @@ pub unsafe extern "C" fn elara_free_buffer(state: *mut ElaraState, buf: *mut u8,
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_load_bytecode(
     state: *mut ElaraState,
-    _buf: *const u8,
-    _len: usize,
+    buf: *const u8,
+    len: usize,
     out_closure: *mut u64,
 ) -> ElaraStatus {
     catch_status(|| {
         if !out_closure.is_null() {
             *out_closure = Value::NIL.0;
         }
-        if !state.is_null() {
-            (*state).last_error = Some("bytecode loading not available");
+        if state.is_null() || buf.is_null() {
+            return ElaraStatus::ErrVerify;
         }
-        ElaraStatus::ErrVerify
+        let s = &mut *state;
+        let bytes = core::slice::from_raw_parts(buf, len);
+        match crate::vm::verify::deserialize_elac(s, bytes) {
+            Ok(proto) => {
+                let closure =
+                    match crate::vm::ObjClosure::new(&mut s.alloc, &mut s.all_objects, 0, proto) {
+                        Some(c) => c,
+                        None => return ElaraStatus::ErrOom,
+                    };
+                if !out_closure.is_null() {
+                    *out_closure = Value::from_obj(closure.cast(), ObjType::Closure).0;
+                }
+                ElaraStatus::Ok
+            }
+            Err(e) => e,
+        }
     })
 }
 
@@ -602,6 +617,15 @@ fn c_error_ptr(msg: &str) -> *const c_char {
         "bytecode serialization not available" => c"bytecode serialization not available".as_ptr(),
         "bytecode loading not available" => c"bytecode loading not available".as_ptr(),
         "elara_call: value is not callable" => c"elara_call: value is not callable".as_ptr(),
+        "elac: truncated header" => c"elac: truncated header".as_ptr(),
+        "elac: bad magic" => c"elac: bad magic".as_ptr(),
+        "elac: unsupported version" => c"elac: unsupported version".as_ptr(),
+        "elac: incompatible platform" => c"elac: incompatible platform".as_ptr(),
+        "elac: truncated payload" => c"elac: truncated payload".as_ptr(),
+        "elac: crc32c mismatch" => c"elac: crc32c mismatch".as_ptr(),
+        "elac: empty code" => c"elac: empty code".as_ptr(),
+        "elac: int48 out of range" => c"elac: int48 out of range".as_ptr(),
+        "elac: bad const tag" => c"elac: bad const tag".as_ptr(),
         _ => c"error".as_ptr(),
     }
 }

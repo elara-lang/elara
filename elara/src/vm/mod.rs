@@ -3,6 +3,7 @@
 mod arith;
 mod call;
 pub mod closure;
+mod crc32c;
 pub mod dispatch;
 pub mod error;
 pub mod fiber;
@@ -14,6 +15,7 @@ pub mod status;
 mod tab;
 pub mod unwind;
 pub mod upvalue;
+pub mod verify;
 
 pub use closure::ObjClosure;
 pub use dispatch::execute;
@@ -36,4 +38,8 @@ pub use unwind::{
 };
 pub use upvalue::{
     ObjUpvalue, capture_upvalue, close_upvalues_from, fill_upvalues, rebase_open_upvalues,
+};
+pub use verify::{
+    ELAC_ENDIAN_LE, ELAC_HEADER_SIZE, ELAC_MAGIC, ELAC_PTR_SIZE, ELAC_VERSION_MAJOR,
+    ELAC_VERSION_MINOR, deserialize_elac, serialize_elac,
 };
