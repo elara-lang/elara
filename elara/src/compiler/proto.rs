@@ -325,7 +325,7 @@ impl ObjProto {
         }
     }
 
-    fn grow_code_and_ic(&mut self, alloc: &mut GcAllocator, new_cap: u32) -> Option<()> {
+    pub(crate) fn grow_code_and_ic(&mut self, alloc: &mut GcAllocator, new_cap: u32) -> Option<()> {
         let old_code_bytes = (self.code_capacity as usize) * size_of::<Instruction>();
         let new_code_bytes = (new_cap as usize).checked_mul(size_of::<Instruction>())?;
         let old_ic_bytes = (self.code_capacity as usize) * size_of::<u16>();
