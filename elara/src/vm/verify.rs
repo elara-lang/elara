@@ -87,7 +87,12 @@ pub unsafe fn deserialize_elac(
         return Err(ElaraStatus::ErrVerify);
     }
     let mut cursor = 0usize;
-    read_proto(state, payload, &mut cursor)
+    let proto = read_proto(state, payload, &mut cursor)?;
+    if let Err(msg) = crate::vm::verify_check::verify_proto(&*proto, None) {
+        state.last_error = Some(msg);
+        return Err(ElaraStatus::ErrVerify);
+    }
+    Ok(proto)
 }
 
 unsafe fn write_proto(out: &mut Vec<u8>, p: &ObjProto) -> Result<(), &'static str> {
