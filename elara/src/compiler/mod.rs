@@ -4,6 +4,7 @@ pub mod disasm;
 pub mod expr;
 mod fold;
 mod jump;
+pub mod module;
 pub mod opcode;
 pub mod proto;
 pub mod scope;
@@ -11,6 +12,7 @@ mod stmt;
 
 pub use disasm::{disassemble_instruction, disassemble_proto};
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
+pub use module::{ensure_string_constant, module_basename};
 pub use opcode::{
     ELARA_MAX_BX, ELARA_OPCODE_COUNT, ELARA_SBX_BIAS, ELARA_SBX_MAX, ELARA_SBX_MIN, ELARA_SJ_BIAS,
     ELARA_SJ_MAX, ELARA_SJ_MIN, InstrFormat, Instruction, OpCode, decode_rk, encode_rk_const,
