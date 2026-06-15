@@ -194,3 +194,204 @@ fn loader_rejects_corrupted_magic_header_and_crc32c_mismatch_with_err_verify() {
         let _ = (root, &mut buf);
     }
 }
+
+#[test]
+fn static_verifier_rejects_out_of_bounds_register_constant_upvalue_and_jump_targets() {
+    use elara::vm::verify_proto;
+
+    let mut state = ElaraState::new();
+    unsafe {
+        // Register out of bounds: Move A=10 with max_stack_size=2
+        let mut p = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("p");
+        {
+            let proto = p.as_mut();
+            proto.max_stack_size = 2;
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::Move, 10, 0, 0),
+                1,
+            );
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::Return, 0, 1, 0),
+                1,
+            );
+        }
+        assert!(verify_proto(p.as_ref(), None).is_err());
+
+        // Constant Bx out of bounds
+        let mut p2 = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("p2");
+        {
+            let proto = p2.as_mut();
+            proto.max_stack_size = 2;
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abx(OpCode::LoadK, 0, 5),
+                1,
+            );
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::Return, 0, 2, 0),
+                1,
+            );
+        }
+        assert_eq!(
+            verify_proto(p2.as_ref(), None).unwrap_err(),
+            "verify: LoadK/Import Bx out of bounds"
+        );
+
+        // Upvalue B out of bounds
+        let mut p3 = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("p3");
+        {
+            let proto = p3.as_mut();
+            proto.max_stack_size = 2;
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::GetUpval, 0, 1, 0),
+                1,
+            );
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::Return, 0, 2, 0),
+                1,
+            );
+        }
+        assert_eq!(
+            verify_proto(p3.as_ref(), None).unwrap_err(),
+            "verify: upvalue B out of bounds"
+        );
+
+        // Jump target out of bounds
+        let mut p4 = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("p4");
+        {
+            let proto = p4.as_mut();
+            proto.max_stack_size = 2;
+            emit(proto, &mut state, Instruction::make_sj(OpCode::Jmp, 99), 1);
+        }
+        assert_eq!(
+            verify_proto(p4.as_ref(), None).unwrap_err(),
+            "verify: jump target out of bounds"
+        );
+
+        // Last instruction neither RETURN nor JMP
+        let mut p5 = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("p5");
+        {
+            let proto = p5.as_mut();
+            proto.max_stack_size = 2;
+            emit(
+                proto,
+                &mut state,
+                Instruction::make_abc(OpCode::Move, 0, 0, 0),
+                1,
+            );
+        }
+        assert_eq!(
+            verify_proto(p5.as_ref(), None).unwrap_err(),
+            "verify: last instruction must be RETURN or JMP"
+        );
+
+        // Child upvalue local index out of parent max_stack_size
+        let mut parent = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("parent");
+        let mut child = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("child");
+        {
+            let c = child.as_mut();
+            c.max_stack_size = 2;
+            c.add_upvalue(
+                &mut state.alloc,
+                UpvalDesc {
+                    index: 7,
+                    is_local: 1,
+                    is_const: 0,
+                    reserved: 0,
+                },
+            )
+            .unwrap();
+            emit(
+                c,
+                &mut state,
+                Instruction::make_abc(OpCode::Return, 0, 1, 0),
+                1,
+            );
+        }
+        {
+            let p = parent.as_mut();
+            p.max_stack_size = 2;
+            p.add_child_proto(&mut state.alloc, child.as_ptr()).unwrap();
+            emit(
+                p,
+                &mut state,
+                Instruction::make_abc(OpCode::Return, 0, 1, 0),
+                1,
+            );
+        }
+        assert_eq!(
+            verify_proto(parent.as_ref(), None).unwrap_err(),
+            "verify: upvalue local index out of bounds"
+        );
+
+        // Loader path rejects invalid bytecode after CRC-valid serialize of bad proto
+        let mut bad = ObjProto::new(
+            &mut state.alloc,
+            &mut state.all_objects,
+            0,
+            core::ptr::null_mut(),
+        )
+        .expect("bad");
+        {
+            let proto = bad.as_mut();
+            proto.max_stack_size = 2;
+            emit(proto, &mut state, Instruction::make_sj(OpCode::Jmp, 50), 1);
+        }
+        let buf = serialize_elac(bad.as_ptr(), 0).expect("ser");
+        let err = deserialize_elac(&mut state, &buf).unwrap_err();
+        assert_eq!(err, ElaraStatus::ErrVerify);
+    }
+}

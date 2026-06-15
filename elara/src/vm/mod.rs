@@ -16,6 +16,7 @@ mod tab;
 pub mod unwind;
 pub mod upvalue;
 pub mod verify;
+mod verify_check;
 
 pub use closure::ObjClosure;
 pub use dispatch::execute;
@@ -43,3 +44,4 @@ pub use verify::{
     ELAC_ENDIAN_LE, ELAC_HEADER_SIZE, ELAC_MAGIC, ELAC_PTR_SIZE, ELAC_VERSION_MAJOR,
     ELAC_VERSION_MINOR, deserialize_elac, serialize_elac,
 };
+pub use verify_check::verify_proto;
