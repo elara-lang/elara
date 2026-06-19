@@ -600,6 +600,7 @@ pub unsafe extern "C" fn elara_last_error(state: *const ElaraState) -> *const c_
         return core::ptr::null();
     }
     match (*state).last_error {
+        Some("__dynamic__") if (*state).error_buf_len > 0 => (*state).error_buf.as_ptr().cast(),
         Some(msg) => c_error_ptr(msg),
         None => core::ptr::null(),
     }

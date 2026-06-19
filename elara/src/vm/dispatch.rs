@@ -884,6 +884,30 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                     }
                 }
             }
+            OpCode::Import => {
+                state.gas_remaining = fuel;
+                frame.pc = pc;
+                if let Err(e) =
+                    unsafe { crate::vm::module::op_import(state, base, k, inst.a(), inst.bx()) }
+                {
+                    let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
+                    if state.resume_after_catch {
+                        state.resume_after_catch = false;
+                        reload_after_catch(
+                            fiber_ptr, &mut frame, &mut base, &mut k, &mut ic, &mut pc,
+                        );
+                        continue;
+                    }
+                    return st;
+                }
+                fuel = state.gas_remaining;
+                // Nested module exec may have swapped `current_fiber`; restore window.
+                fiber = unsafe { &mut *fiber_ptr };
+                frame = unsafe { &mut *fiber.frames.add(fiber.frame_count as usize - 1) };
+                base = unsafe { fiber.stack.add(frame.base_idx as usize) };
+                k = unsafe { (*(*frame.closure).proto).constants.cast_const() };
+                ic = unsafe { (*(*frame.closure).proto).ic_slots };
+            }
             _ => {
                 let st =
                     finish_err_fiber(state, fiber_ptr, frame, pc, fuel, ElaraStatus::ErrRuntime);
