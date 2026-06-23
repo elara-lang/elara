@@ -63,6 +63,10 @@ pub unsafe fn mark_roots(state: &mut ElaraState) {
         shade_object(gc, state.globals.cast::<GcHeader>());
     }
 
+    if !state.modules_table.is_null() {
+        shade_object(gc, state.modules_table.cast::<GcHeader>());
+    }
+
     if !state.current_fiber.is_null() {
         shade_object(gc, state.current_fiber.cast::<GcHeader>());
     }

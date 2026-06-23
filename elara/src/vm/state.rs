@@ -47,9 +47,14 @@ pub struct ElaraState {
     pub capabilities: u32,
     /// Global environment table (may be null before open completes).
     pub globals: *mut ObjTable,
+    /// Singleton module cache (`specifier` → exports table or loading sentinel).
+    pub modules_table: *mut ObjTable,
     /// Optional host module loader.
     pub module_loader: Option<ElaraModuleLoaderFn>,
     pub module_loader_ud: *mut c_void,
+    /// NUL-terminated dynamic error message buffer (module loader / cycle / not-found).
+    pub error_buf: [u8; 256],
+    pub error_buf_len: usize,
 }
 
 impl ElaraState {

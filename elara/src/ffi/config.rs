@@ -126,8 +126,11 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
             cfg.capabilities
         },
         globals,
+        modules_table: core::ptr::null_mut(),
         module_loader: None,
         module_loader_ud: core::ptr::null_mut(),
+        error_buf: [0u8; 256],
+        error_buf_len: 0,
     }
 }
 
@@ -167,6 +170,7 @@ pub unsafe fn destroy_state(state: *mut ElaraState) {
     let mut s = Box::from_raw(state);
     s.current_fiber = core::ptr::null_mut::<ObjFiber>();
     s.globals = core::ptr::null_mut();
+    s.modules_table = core::ptr::null_mut();
     for _ in 0..32 {
         crate::gc::gc_collect(&mut s);
         if s.all_objects.is_null() {
