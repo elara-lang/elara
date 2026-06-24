@@ -59,6 +59,11 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
         let inst = unsafe { *pc };
         pc = unsafe { pc.add(1) };
 
+        // Single predicted check: zero overhead when hooks are disabled.
+        if state.debug.hook_mask != 0 {
+            unsafe { crate::vm::debug::on_instruction(state, frame, pc) };
+        }
+
         if gas_limited {
             fuel -= 1;
             if fuel <= 0 {
@@ -764,7 +769,10 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 frame.pc = pc;
                 match unsafe { op_call(state, fiber, frame, base, pc, inst) } {
                     Ok(w) => {
-                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w)
+                        apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w);
+                        if state.debug.hook_mask != 0 {
+                            unsafe { crate::vm::debug::on_call(state, frame) };
+                        }
                     }
                     Err(e) => {
                         let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
@@ -786,6 +794,9 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         k = w.k;
                         ic = unsafe { (*(*frame.closure).proto).ic_slots };
                         pc = w.pc;
+                        if state.debug.hook_mask != 0 {
+                            unsafe { crate::vm::debug::on_call(state, frame) };
+                        }
                     }
                     Err(e) => {
                         let st = finish_err_fiber(state, fiber_ptr, frame, pc, fuel, e);
@@ -801,6 +812,9 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 }
             }
             OpCode::Return => {
+                if state.debug.hook_mask != 0 {
+                    unsafe { crate::vm::debug::on_return(state, frame) };
+                }
                 match unsafe { op_return(state, fiber, frame, base, inst.a(), inst.b(), fuel) } {
                     ReturnOutcome::Finished => {
                         match unsafe { finish_fiber_return(state, fiber_ptr) } {

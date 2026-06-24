@@ -135,6 +135,37 @@ void        elara_set_global(elara_State* S, const char* name, elara_Value val);
 elara_Value elara_get_global(elara_State* S, const char* name);
 const char* elara_last_error(const elara_State* S);
 
+/* Debug hooks & live introspection */
+#define ELARA_HOOK_CALL  (1u << 0)
+#define ELARA_HOOK_RET   (1u << 1)
+#define ELARA_HOOK_LINE  (1u << 2)
+#define ELARA_HOOK_COUNT (1u << 3)
+
+typedef struct elara_DebugEvent {
+    uint32_t    event;       /* ELARA_HOOK_* */
+    const char* source_name;
+    const char* fn_name;
+    uint32_t    line;        /* 1-based source line */
+    uint32_t    frame_depth; /* 0 = active top frame */
+    uint32_t    pc_offset;
+} elara_DebugEvent;
+
+typedef struct elara_FrameInfo {
+    const char* source_name;
+    uint32_t    line;
+    uint16_t    num_params;
+    uint16_t    num_locals;
+    uint8_t     is_tail_call;
+    uint8_t     is_native;
+} elara_FrameInfo;
+
+typedef void (*elara_HookFn)(elara_State* S, const elara_DebugEvent* ev, void* ud);
+
+void elara_set_hook(elara_State* S, elara_HookFn fn, void* ud, uint32_t mask, uint32_t count_interval);
+bool elara_debug_get_frame(const elara_State* S, uint32_t depth, elara_FrameInfo* out_info);
+bool elara_debug_get_local(const elara_State* S, uint32_t depth, uint16_t reg_idx, elara_Value* out_val);
+bool elara_debug_set_local(elara_State* S, uint32_t depth, uint16_t reg_idx, elara_Value val);
+
 #ifdef __cplusplus
 }
 #endif

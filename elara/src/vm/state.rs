@@ -5,6 +5,7 @@ use core::ffi::c_void;
 use crate::ffi::config::{ElaraModuleLoaderFn, state_for_tests};
 use crate::gc::GcAllocator;
 use crate::value::{GcHeader, InternPool, ObjTable, Value};
+use crate::vm::debug::DebugState;
 use crate::vm::error::ErrorState;
 use crate::vm::fiber::ObjFiber;
 use crate::vm::upvalue::ObjUpvalue;
@@ -18,6 +19,8 @@ pub struct ElaraState {
     pub gc: crate::gc::GcState,
     /// Pre-allocated stack-trace / OOM error buffers.
     pub error: ErrorState,
+    /// Debug hooks and live introspection control block.
+    pub debug: DebugState,
     /// Fiber currently executing inside the VM (null when idle).
     pub current_fiber: *mut ObjFiber,
     /// Interned `"__index"` key for metatable lookup.

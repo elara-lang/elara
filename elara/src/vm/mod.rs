@@ -4,6 +4,7 @@ mod arith;
 mod call;
 pub mod closure;
 mod crc32c;
+pub mod debug;
 pub mod dispatch;
 pub mod error;
 pub mod fiber;
@@ -20,6 +21,11 @@ pub mod verify;
 mod verify_check;
 
 pub use closure::ObjClosure;
+pub use debug::{
+    DebugState, ELARA_HOOK_CALL, ELARA_HOOK_COUNT, ELARA_HOOK_LINE, ELARA_HOOK_RET,
+    ElaraDebugEvent, ElaraFrameInfo, ElaraHookFn, debug_get_frame, debug_get_local,
+    debug_set_local, set_hook,
+};
 pub use dispatch::execute;
 pub use error::{
     ELARA_MAX_TRACE_FRAMES, ErrorState, TraceEntry, capture_stack_trace, frame_pc_index,
