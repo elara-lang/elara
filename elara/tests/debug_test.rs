@@ -10,7 +10,8 @@ use elara::ffi::c_api::{
 use elara::value::{ObjType, Value};
 use elara::vm::{
     CallFrame, ELARA_HOOK_CALL, ELARA_HOOK_COUNT, ELARA_HOOK_LINE, ELARA_HOOK_RET, ElaraDebugEvent,
-    ElaraFrameInfo, ElaraState, ElaraStatus, ObjClosure, ObjFiber, execute,
+    ElaraFrameInfo, ElaraState, ElaraStatus, ObjClosure, ObjFiber, enable_profiler, execute,
+    format_dap_stack_trace,
 };
 
 static EVENT_LOG: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -303,5 +304,121 @@ fn debug_frame_and_local_introspection_reads_and_mutates_live_registers() {
         );
         assert_eq!(run(&mut state, main.as_ptr()), ElaraStatus::Ok);
         assert!(INTROSPECT_OK.load(Ordering::SeqCst));
+    }
+}
+
+static DAP_JSON: Mutex<String> = Mutex::new(String::new());
+
+unsafe extern "C" fn dap_capture_hook(
+    state: *mut ElaraState,
+    ev: *const ElaraDebugEvent,
+    _ud: *mut core::ffi::c_void,
+) {
+    if (*ev).event != ELARA_HOOK_CALL {
+        return;
+    }
+    let json = format_dap_stack_trace(&*state);
+    *DAP_JSON.lock().unwrap() = json;
+}
+
+#[test]
+fn profiler_records_opcode_histogram_and_exports_dap_stack_trace_json() {
+    let mut state = ElaraState::new();
+    unsafe {
+        let src = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"prof.ela")
+            .unwrap();
+        let mut child =
+            ObjProto::new(&mut state.alloc, &mut state.all_objects, 0, src.as_ptr()).unwrap();
+        {
+            let p = child.as_mut();
+            p.max_stack_size = 2;
+            emit(
+                p,
+                &mut state.alloc,
+                Instruction::make_asbx(OpCode::LoadI, 0, 42),
+                5,
+            );
+            emit(
+                p,
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Return, 0, 2, 0),
+                6,
+            );
+        }
+        let mut main =
+            ObjProto::new(&mut state.alloc, &mut state.all_objects, 0, src.as_ptr()).unwrap();
+        {
+            let p = main.as_mut();
+            p.max_stack_size = 4;
+            p.add_child_proto(&mut state.alloc, child.as_ptr()).unwrap();
+            emit(
+                p,
+                &mut state.alloc,
+                Instruction::make_abx(OpCode::Closure, 0, 0),
+                1,
+            );
+            emit(
+                p,
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Call, 0, 1, 2),
+                2,
+            );
+            emit(
+                p,
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Return, 0, 2, 0),
+                3,
+            );
+        }
+
+        enable_profiler(&mut state);
+        DAP_JSON.lock().unwrap().clear();
+        elara_set_hook(
+            &mut state,
+            Some(dap_capture_hook),
+            core::ptr::null_mut(),
+            ELARA_HOOK_CALL,
+            0,
+        );
+
+        assert_eq!(run(&mut state, main.as_ptr()), ElaraStatus::Ok);
+
+        // Opcode histogram: Closure, Call, LoadI, Return×2 (main+child) at minimum.
+        let load_i = OpCode::LoadI as usize;
+        let call = OpCode::Call as usize;
+        let ret = OpCode::Return as usize;
+        assert!(
+            state.debug.opcode_counts[load_i] >= 1,
+            "LoadI count={}",
+            state.debug.opcode_counts[load_i]
+        );
+        assert!(state.debug.opcode_counts[call] >= 1);
+        assert!(state.debug.opcode_counts[ret] >= 2);
+
+        // Child should have been called once with inclusive insns.
+        assert!(
+            state
+                .debug
+                .fn_counters
+                .iter()
+                .any(|c| c.calls >= 1 && c.inclusive_insns >= 1),
+            "fn_counters={:?}",
+            state.debug.fn_counters
+        );
+
+        let json = DAP_JSON.lock().unwrap().clone();
+        assert!(
+            json.contains("\"stackFrames\""),
+            "missing stackFrames: {json}"
+        );
+        assert!(json.contains("\"totalFrames\""), "missing totalFrames");
+        assert!(json.contains("\"variables\""), "missing variables");
+        assert!(json.contains("\"path\""), "missing source path");
+        assert!(json.contains("prof.ela"), "missing source name: {json}");
+        assert!(json.contains("\"name\":\"R0\""), "missing R0 var: {json}");
+        // Basic JSON shape braces.
+        assert!(json.starts_with('{') && json.ends_with('}'));
     }
 }

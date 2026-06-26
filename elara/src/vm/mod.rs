@@ -23,8 +23,8 @@ mod verify_check;
 pub use closure::ObjClosure;
 pub use debug::{
     DebugState, ELARA_HOOK_CALL, ELARA_HOOK_COUNT, ELARA_HOOK_LINE, ELARA_HOOK_RET,
-    ElaraDebugEvent, ElaraFrameInfo, ElaraHookFn, debug_get_frame, debug_get_local,
-    debug_set_local, set_hook,
+    ElaraDebugEvent, ElaraFrameInfo, ElaraHookFn, FnCounters, debug_get_frame, debug_get_local,
+    debug_set_local, enable_profiler, format_dap_stack_trace, set_hook,
 };
 pub use dispatch::execute;
 pub use error::{

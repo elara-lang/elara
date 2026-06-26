@@ -59,9 +59,14 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
         let inst = unsafe { *pc };
         pc = unsafe { pc.add(1) };
 
-        // Single predicted check: zero overhead when hooks are disabled.
-        if state.debug.hook_mask != 0 {
-            unsafe { crate::vm::debug::on_instruction(state, frame, pc) };
+        // Single predicted check: zero overhead when hooks and profiler are off.
+        if state.debug.hook_mask != 0 || state.debug.profiling {
+            if state.debug.hook_mask != 0 {
+                unsafe { crate::vm::debug::on_instruction(state, frame, pc) };
+            }
+            if state.debug.profiling {
+                unsafe { crate::vm::debug::record_instruction(state, frame, inst) };
+            }
         }
 
         if gas_limited {
@@ -770,6 +775,9 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                 match unsafe { op_call(state, fiber, frame, base, pc, inst) } {
                     Ok(w) => {
                         apply_window(&mut frame, fiber, &mut base, &mut k, &mut ic, &mut pc, w);
+                        if state.debug.profiling {
+                            unsafe { crate::vm::debug::record_call(state, frame) };
+                        }
                         if state.debug.hook_mask != 0 {
                             unsafe { crate::vm::debug::on_call(state, frame) };
                         }
@@ -794,6 +802,9 @@ pub unsafe fn execute(state: &mut ElaraState, fiber: *mut ObjFiber) -> ElaraStat
                         k = w.k;
                         ic = unsafe { (*(*frame.closure).proto).ic_slots };
                         pc = w.pc;
+                        if state.debug.profiling {
+                            unsafe { crate::vm::debug::record_call(state, frame) };
+                        }
                         if state.debug.hook_mask != 0 {
                             unsafe { crate::vm::debug::on_call(state, frame) };
                         }
