@@ -7,6 +7,7 @@ use core::ffi::c_void;
 use crate::ffi::sandbox::{ELARA_CAP_ALL, ELARA_CAP_SAFE_DEFAULT};
 use crate::gc::{ElaraAllocFn, GcAllocator, GcState, default_alloc_fn};
 use crate::value::{GcHeader, InternPool, ObjType, Value};
+use crate::vm::debug::DebugState;
 use crate::vm::error::ErrorState;
 use crate::vm::fiber::ObjFiber;
 use crate::vm::state::ElaraState;
@@ -89,6 +90,7 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
     gc.bytes_allocated = alloc.bytes_allocated;
 
     let error = ErrorState::new(&mut strings, &mut alloc, &mut all_objects);
+    let debug = DebugState::new();
     gc.all_objects = all_objects;
     gc.bytes_allocated = alloc.bytes_allocated;
 
@@ -105,6 +107,7 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
         strings,
         gc,
         error,
+        debug,
         current_fiber: core::ptr::null_mut(),
         mm_index,
         mm_newindex,

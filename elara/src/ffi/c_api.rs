@@ -630,3 +630,57 @@ fn c_error_ptr(msg: &str) -> *const c_char {
         _ => c"error".as_ptr(),
     }
 }
+
+/* ---- Debug hooks ---- */
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_set_hook(
+    state: *mut ElaraState,
+    hook: Option<crate::vm::debug::ElaraHookFn>,
+    ud: *mut c_void,
+    mask: u32,
+    count_interval: u32,
+) {
+    if state.is_null() {
+        return;
+    }
+    crate::vm::debug::set_hook(&mut *state, hook, ud, mask, count_interval);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_debug_get_frame(
+    state: *const ElaraState,
+    depth: u32,
+    out_info: *mut crate::vm::debug::ElaraFrameInfo,
+) -> bool {
+    if state.is_null() {
+        return false;
+    }
+    crate::vm::debug::debug_get_frame(&*state, depth, out_info)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_debug_get_local(
+    state: *const ElaraState,
+    depth: u32,
+    reg_idx: u16,
+    out_val: *mut u64,
+) -> bool {
+    if state.is_null() {
+        return false;
+    }
+    crate::vm::debug::debug_get_local(&*state, depth, reg_idx, out_val)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_debug_set_local(
+    state: *mut ElaraState,
+    depth: u32,
+    reg_idx: u16,
+    val: u64,
+) -> bool {
+    if state.is_null() {
+        return false;
+    }
+    crate::vm::debug::debug_set_local(&mut *state, depth, reg_idx, val)
+}
