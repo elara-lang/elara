@@ -48,59 +48,6 @@ pub struct ElaraFrameInfo {
     pub is_native: u8,
 }
 
-/// Per-state debug / hook control block.
-pub struct DebugState {
-    pub hook_fn: Option<ElaraHookFn>,
-    pub hook_ud: *mut c_void,
-    pub hook_mask: u32,
-    pub count_interval: u32,
-    pub count_remaining: u32,
-    pub last_line: u32,
-    pub in_hook: bool,
-}
-
-impl DebugState {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            hook_fn: None,
-            hook_ud: core::ptr::null_mut(),
-            hook_mask: 0,
-            count_interval: 0,
-            count_remaining: 0,
-            last_line: u32::MAX,
-            in_hook: false,
-        }
-    }
-}
-
-impl Default for DebugState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Installs or clears the host debug hook.
-pub fn set_hook(
-    state: &mut ElaraState,
-    hook: Option<ElaraHookFn>,
-    ud: *mut c_void,
-    mask: u32,
-    count_interval: u32,
-) {
-    state.debug.hook_fn = hook;
-    state.debug.hook_ud = ud;
-    state.debug.hook_mask = mask;
-    state.debug.count_interval = count_interval;
-    state.debug.count_remaining = if mask & ELARA_HOOK_COUNT != 0 {
-        count_interval.max(1)
-    } else {
-        0
-    };
-    state.debug.last_line = u32::MAX;
-    state.debug.in_hook = false;
-}
-
 #[inline]
 unsafe fn cstr_from_obj_string(s: *mut ObjString) -> *const c_char {
     if s.is_null() {
@@ -110,7 +57,7 @@ unsafe fn cstr_from_obj_string(s: *mut ObjString) -> *const c_char {
 }
 
 #[inline]
-unsafe fn proto_of(frame: &CallFrame) -> Option<&ObjProto> {
+pub(super) unsafe fn proto_of(frame: &CallFrame) -> Option<&ObjProto> {
     if frame.closure.is_null() || frame.flags & FRAME_FLAG_C_BOUNDARY != 0 {
         return None;
     }
@@ -224,7 +171,7 @@ pub unsafe fn on_return(state: &mut ElaraState, frame: &CallFrame) {
     );
 }
 
-unsafe fn frame_at(fiber: *const ObjFiber, depth: u32) -> Option<*mut CallFrame> {
+pub(super) unsafe fn frame_at(fiber: *const ObjFiber, depth: u32) -> Option<*mut CallFrame> {
     if fiber.is_null() {
         return None;
     }
