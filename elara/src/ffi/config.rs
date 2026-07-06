@@ -3,6 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use core::ffi::c_void;
+use std::time::Instant;
 
 use crate::ffi::sandbox::{ELARA_CAP_ALL, ELARA_CAP_SAFE_DEFAULT};
 use crate::gc::{ElaraAllocFn, GcAllocator, GcState, default_alloc_fn};
@@ -101,6 +102,21 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
         (g, g)
     };
 
+    // Seed PRNG from config hash_seed via SplitMix64.
+    let mut z = if cfg.hash_seed == 0 {
+        0xC0FF_EE42_u64
+    } else {
+        cfg.hash_seed
+    };
+    let mut splitmix = || {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut x = z;
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    };
+    let rng = [splitmix(), splitmix(), splitmix(), splitmix()];
+
     ElaraState {
         alloc,
         all_objects,
@@ -134,6 +150,10 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
         module_loader_ud: core::ptr::null_mut(),
         error_buf: [0u8; 256],
         error_buf_len: 0,
+        rng,
+        start_instant: Instant::now(),
+        exit_code: None,
+        cli_args: Vec::new(),
     }
 }
 

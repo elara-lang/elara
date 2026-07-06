@@ -106,7 +106,7 @@ pub unsafe fn op_import(
         }
     }
 
-    // 2. Intrinsic registry (empty tables until stdlib bodies land).
+    // 2. Intrinsic registry (stdlib modules).
     if matches!(spec, "math" | "string" | "table" | "bit" | "sys" | "fiber") {
         if let Some(cap) = module_required_cap(spec)
             && !has_capability(state, cap)
@@ -117,12 +117,13 @@ pub unsafe fn op_import(
             );
             return Err(ElaraStatus::ErrModule);
         }
-        let exports = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4)
-            .ok_or(ElaraStatus::ErrOom)?;
-        let ev = Value::from_obj(
-            core::ptr::NonNull::new(exports.as_ptr().cast()).unwrap(),
-            ObjType::Table,
-        );
+        let ev = match crate::stdlib::intrinsic_module(state, spec)? {
+            Some(v) => v,
+            None => {
+                set_module_error(state, format_args!("Module not found: '{spec}'"));
+                return Err(ElaraStatus::ErrModule);
+            }
+        };
         (*table)
             .set(&mut state.alloc, spec_val, ev)
             .map_err(|_| ElaraStatus::ErrOom)?;

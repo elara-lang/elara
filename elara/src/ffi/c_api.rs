@@ -47,14 +47,20 @@ pub unsafe extern "C" fn elara_default_config() -> ElaraConfig {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_open() -> *mut ElaraState {
-    catch_ptr(|| Box::into_raw(Box::new(state_from_config(None))))
+    catch_ptr(|| {
+        let mut s = state_from_config(None);
+        let _ = crate::stdlib::open_stdlib(&mut s);
+        Box::into_raw(Box::new(s))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_open_with_config(cfg: *const ElaraConfig) -> *mut ElaraState {
     catch_ptr(|| {
         let c = if cfg.is_null() { None } else { Some(&*cfg) };
-        Box::into_raw(Box::new(state_from_config(c)))
+        let mut s = state_from_config(c);
+        let _ = crate::stdlib::open_stdlib(&mut s);
+        Box::into_raw(Box::new(s))
     })
 }
 
@@ -251,7 +257,8 @@ pub unsafe extern "C" fn elara_call(
     })
 }
 
-unsafe fn call_value(
+/// Invokes a closure or native with `args`, writing returns into `results`.
+pub(crate) unsafe fn call_value(
     state: &mut ElaraState,
     callable: Value,
     args: &[Value],
