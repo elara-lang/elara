@@ -1,6 +1,7 @@
 //! Minimal VM host state (gas + allocator + string pool) for the dispatch loop.
 
 use core::ffi::c_void;
+use std::time::Instant;
 
 use crate::ffi::config::{ElaraModuleLoaderFn, state_for_tests};
 use crate::gc::GcAllocator;
@@ -58,6 +59,14 @@ pub struct ElaraState {
     /// NUL-terminated dynamic error message buffer (module loader / cycle / not-found).
     pub error_buf: [u8; 256],
     pub error_buf_len: usize,
+    /// xoshiro256** PRNG state for `math.random`.
+    pub rng: [u64; 4],
+    /// Monotonic clock origin for `sys.clock_ns`.
+    pub start_instant: Instant,
+    /// Set by `sys.exit` (CLI / host observes and terminates).
+    pub exit_code: Option<i32>,
+    /// CLI script arguments exposed as `sys.args`.
+    pub cli_args: Vec<String>,
 }
 
 impl ElaraState {
