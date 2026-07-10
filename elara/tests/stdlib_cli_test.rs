@@ -62,7 +62,6 @@ unsafe fn module_field(state: &mut ElaraState, module: &str, field: &str) -> Val
 
 #[test]
 fn stdlib_math_string_table_and_bit_modules_obey_0_based_indexing_and_edge_cases() {
-    // 014.1 covers math / bit / sys / core globals. string & table assertions land with 014.2.
     let mut state = ElaraState::new();
     unsafe {
         elara::stdlib::open_stdlib(&mut state).expect("stdlib");
@@ -186,6 +185,147 @@ fn stdlib_math_string_table_and_bit_modules_obey_0_based_indexing_and_edge_cases
             (*ver.as_obj().cast::<elara::value::ObjString>()).as_bytes(),
             b"Elara 1.0.0"
         );
+
+        // --- string (0-based) ---
+        let hello = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"hello")
+            .unwrap();
+        let hv = Value::from_obj(hello.cast(), ObjType::String);
+
+        let slen = module_field(&mut state, "string", "len");
+        let (st, v) = call1(&mut state, slen.0, hv);
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(5));
+
+        let slice = module_field(&mut state, "string", "slice");
+        let (st, v) = call2(&mut state, slice.0, hv, Value::from_i48(1));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(
+            (*v.as_obj().cast::<elara::value::ObjString>()).as_bytes(),
+            b"ello"
+        );
+
+        // Negative index: slice(s, -2) → last 2 bytes "lo"
+        let mut results = [0u64; 2];
+        let mut n = 0u16;
+        let args = [hv.0, Value::from_i48(-2).0];
+        let st = elara_call(
+            &mut state,
+            slice.0,
+            args.as_ptr(),
+            2,
+            results.as_mut_ptr(),
+            2,
+            &mut n,
+        );
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(
+            (*Value(results[0]).as_obj().cast::<elara::value::ObjString>()).as_bytes(),
+            b"lo"
+        );
+
+        let sbyte = module_field(&mut state, "string", "byte");
+        let (st, v) = call2(&mut state, sbyte.0, hv, Value::from_i48(0));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(b'h' as i64));
+        let (st, v) = call2(&mut state, sbyte.0, hv, Value::from_i48(-1));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(b'o' as i64));
+
+        let find = module_field(&mut state, "string", "find");
+        let ll = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"ll")
+            .unwrap();
+        let (st, v) = call2(
+            &mut state,
+            find.0,
+            hv,
+            Value::from_obj(ll.cast(), ObjType::String),
+        );
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(2));
+
+        let starts = module_field(&mut state, "string", "starts_with");
+        let he = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, b"he")
+            .unwrap();
+        let (st, v) = call2(
+            &mut state,
+            starts.0,
+            hv,
+            Value::from_obj(he.cast(), ObjType::String),
+        );
+        assert_eq!(st, ElaraStatus::Ok);
+        assert!(v.as_bool());
+
+        // --- table (0-based) ---
+        let t = elara::value::ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 8)
+            .unwrap();
+        let tv = Value::from_obj(
+            core::ptr::NonNull::new(t.as_ptr().cast()).unwrap(),
+            ObjType::Table,
+        );
+
+        let push = module_field(&mut state, "table", "push");
+        let (st, v) = call2(&mut state, push.0, tv, Value::from_i48(10));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(1));
+        let (st, v) = call2(&mut state, push.0, tv, Value::from_i48(20));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(2));
+        assert_eq!((*t.as_ptr()).get_int(0).to_i64(), Some(10));
+        assert_eq!((*t.as_ptr()).get_int(1).to_i64(), Some(20));
+
+        let insert = module_field(&mut state, "table", "insert");
+        let mut results = [0u64; 1];
+        let mut n = 0u16;
+        let args = [tv.0, Value::from_i48(1).0, Value::from_i48(15).0];
+        let st = elara_call(
+            &mut state,
+            insert.0,
+            args.as_ptr(),
+            3,
+            results.as_mut_ptr(),
+            1,
+            &mut n,
+        );
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!((*t.as_ptr()).get_int(0).to_i64(), Some(10));
+        assert_eq!((*t.as_ptr()).get_int(1).to_i64(), Some(15));
+        assert_eq!((*t.as_ptr()).get_int(2).to_i64(), Some(20));
+
+        let remove = module_field(&mut state, "table", "remove");
+        let (st, v) = call2(&mut state, remove.0, tv, Value::from_i48(1));
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!(v.to_i64(), Some(15));
+        assert_eq!((*t.as_ptr()).array_len, 2);
+
+        let sort = module_field(&mut state, "table", "sort");
+        let (st, _) = call2(&mut state, push.0, tv, Value::from_i48(5));
+        assert_eq!(st, ElaraStatus::Ok);
+        let mut results = [0u64; 1];
+        let mut n = 0u16;
+        let st = elara_call(
+            &mut state,
+            sort.0,
+            [tv.0].as_ptr(),
+            1,
+            results.as_mut_ptr(),
+            1,
+            &mut n,
+        );
+        assert_eq!(st, ElaraStatus::Ok);
+        assert_eq!((*t.as_ptr()).get_int(0).to_i64(), Some(5));
+        assert_eq!((*t.as_ptr()).get_int(1).to_i64(), Some(10));
+        assert_eq!((*t.as_ptr()).get_int(2).to_i64(), Some(20));
+
+        let get_mt = module_field(&mut state, "table", "get_metatable");
+        let (st, v) = call1(&mut state, get_mt.0, tv);
+        assert_eq!(st, ElaraStatus::Ok);
+        assert!(v.is_nil());
 
         // --- assert / pcall ---
         let assert_fn = global_fn(&mut state, "assert");

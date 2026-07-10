@@ -5,7 +5,9 @@
 mod bit;
 mod globals;
 mod math;
+mod string;
 mod sys;
+mod table;
 mod util;
 
 use crate::value::nan::Value;
@@ -26,8 +28,9 @@ pub unsafe fn intrinsic_module(
         "math" => unsafe { math::make_module(state)? },
         "bit" => unsafe { bit::make_module(state)? },
         "sys" => unsafe { sys::make_module(state)? },
-        "string" | "table" | "fiber" => {
-            // Bodies land in later tasks; return an empty capability-gated table.
+        "string" => unsafe { string::make_module(state)? },
+        "table" => unsafe { table::make_module(state)? },
+        "fiber" => {
             let t =
                 crate::value::ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4)
                     .ok_or(ElaraStatus::ErrOom)?;
