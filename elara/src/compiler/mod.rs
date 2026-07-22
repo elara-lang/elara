@@ -1,15 +1,18 @@
 //! Single-pass Pratt compiler, lexical scope resolver, function prototypes, and 32-bit ISA.
 
+pub mod compile;
 pub mod disasm;
 pub mod expr;
 mod fold;
 mod jump;
 pub mod module;
 pub mod opcode;
+mod parse;
 pub mod proto;
 pub mod scope;
 mod stmt;
 
+pub use compile::{bind_env_upvalue, closure_with_env, compile_script, set_compile_error};
 pub use disasm::{disassemble_instruction, disassemble_proto};
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
 pub use module::{ensure_string_constant, module_basename};

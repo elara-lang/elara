@@ -31,6 +31,13 @@ fn catch_status(f: impl FnOnce() -> ElaraStatus) -> ElaraStatus {
     }
 }
 
+unsafe fn c_str_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+    if p.is_null() {
+        return None;
+    }
+    core::ffi::CStr::from_ptr(p).to_str().ok()
+}
+
 fn catch_ptr<T>(f: impl FnOnce() -> *mut T) -> *mut T {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(p) => p,
@@ -138,27 +145,60 @@ pub unsafe extern "C" fn elara_gc_step(state: *mut ElaraState, budget_us: u32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_eval(
     state: *mut ElaraState,
-    _name: *const c_char,
-    _source: *const c_char,
+    name: *const c_char,
+    source: *const c_char,
     out_result: *mut u64,
 ) -> ElaraStatus {
     catch_status(|| {
-        if state.is_null() {
-            return ElaraStatus::ErrRuntime;
-        }
-        (*state).last_error = Some("source evaluation requires the bytecode pipeline");
         if !out_result.is_null() {
             *out_result = Value::NIL.0;
         }
-        ElaraStatus::ErrSyntax
+        if state.is_null() || source.is_null() {
+            return ElaraStatus::ErrRuntime;
+        }
+        let s = &mut *state;
+        let src = match c_str_to_str(source) {
+            Some(t) => t,
+            None => {
+                s.last_error = Some("invalid source string");
+                return ElaraStatus::ErrSyntax;
+            }
+        };
+        let chunk = if name.is_null() {
+            "=eval"
+        } else {
+            c_str_to_str(name).unwrap_or("=eval")
+        };
+        let proto = match crate::compiler::compile_script(s, chunk, src) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::compiler::set_compile_error(s, &e);
+                return ElaraStatus::ErrSyntax;
+            }
+        };
+        let closure = match crate::compiler::closure_with_env(s, proto) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        let cv = Value::from_obj(closure.cast(), ObjType::Closure);
+        let mut results = [Value::NIL; 1];
+        match call_value(s, cv, &[], &mut results) {
+            Ok(_) => {
+                if !out_result.is_null() {
+                    *out_result = results[0].0;
+                }
+                ElaraStatus::Ok
+            }
+            Err(e) => e,
+        }
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_compile_to_bytecode(
     state: *mut ElaraState,
-    _name: *const c_char,
-    _source: *const c_char,
+    name: *const c_char,
+    source: *const c_char,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
 ) -> ElaraStatus {
@@ -169,10 +209,53 @@ pub unsafe extern "C" fn elara_compile_to_bytecode(
         if !out_len.is_null() {
             *out_len = 0;
         }
-        if !state.is_null() {
-            (*state).last_error = Some("bytecode serialization not available");
+        if state.is_null() || source.is_null() {
+            return ElaraStatus::ErrRuntime;
         }
-        ElaraStatus::ErrVerify
+        let s = &mut *state;
+        let src = match c_str_to_str(source) {
+            Some(t) => t,
+            None => {
+                s.last_error = Some("invalid source string");
+                return ElaraStatus::ErrSyntax;
+            }
+        };
+        let chunk = if name.is_null() {
+            "=compile"
+        } else {
+            c_str_to_str(name).unwrap_or("=compile")
+        };
+        let proto = match crate::compiler::compile_script(s, chunk, src) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::compiler::set_compile_error(s, &e);
+                return ElaraStatus::ErrSyntax;
+            }
+        };
+        if let Err(msg) = crate::vm::verify_proto(&*proto, None) {
+            s.last_error = Some(msg);
+            return ElaraStatus::ErrVerify;
+        }
+        let bytes = match crate::vm::serialize_elac(proto, 0) {
+            Ok(b) => b,
+            Err(msg) => {
+                s.last_error = Some(msg);
+                return ElaraStatus::ErrVerify;
+            }
+        };
+        let len = bytes.len();
+        let raw = match s.alloc.alloc_bytes(len) {
+            Some(p) => p,
+            None => return ElaraStatus::ErrOom,
+        };
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.as_ptr(), len);
+        if !out_buf.is_null() {
+            *out_buf = raw.as_ptr();
+        }
+        if !out_len.is_null() {
+            *out_len = len;
+        }
+        ElaraStatus::Ok
     })
 }
 
@@ -207,6 +290,16 @@ pub unsafe extern "C" fn elara_load_bytecode(
                         Some(c) => c,
                         None => return ElaraStatus::ErrOom,
                     };
+                // Script chunks compile with env upvalue 0 (`is_local=0`, `index=0`).
+                if (*proto).upvalue_count > 0 {
+                    let desc = *(*proto).upvalues;
+                    if desc.is_local == 0
+                        && desc.index == 0
+                        && let Err(e) = crate::compiler::bind_env_upvalue(s, closure.as_ptr())
+                    {
+                        return e;
+                    }
+                }
                 if !out_closure.is_null() {
                     *out_closure = Value::from_obj(closure.cast(), ObjType::Closure).0;
                 }

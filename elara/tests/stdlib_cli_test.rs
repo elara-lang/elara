@@ -350,3 +350,79 @@ fn stdlib_math_string_table_and_bit_modules_obey_0_based_indexing_and_edge_cases
         assert!(n >= 2);
     }
 }
+
+#[test]
+fn elarac_compiles_source_to_elac_and_elara_executes_binary_identically() {
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("elara_cli_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("sample.ela");
+    let bc = dir.join("sample.elac");
+    std::fs::write(&src, "print(20 + 22)\n").unwrap();
+
+    let elarac = env!("CARGO_BIN_EXE_elarac");
+    let elara = env!("CARGO_BIN_EXE_elara");
+
+    let out = Command::new(elarac)
+        .args(["-o", bc.to_str().unwrap(), src.to_str().unwrap()])
+        .output()
+        .expect("run elarac");
+    assert!(
+        out.status.success(),
+        "elarac failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(bc.is_file());
+
+    let from_source = Command::new(elara)
+        .arg(src.to_str().unwrap())
+        .output()
+        .expect("run elara source");
+    let from_binary = Command::new(elara)
+        .arg(bc.to_str().unwrap())
+        .output()
+        .expect("run elara binary");
+    assert!(from_source.status.success());
+    assert!(from_binary.status.success());
+    assert_eq!(from_source.stdout, from_binary.stdout);
+    assert_eq!(String::from_utf8_lossy(&from_source.stdout).trim(), "42");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn elara_cli_enforces_gas_and_mem_limit_flags_and_supports_inline_eval() {
+    use std::process::Command;
+
+    let elara = env!("CARGO_BIN_EXE_elara");
+
+    let eval = Command::new(elara)
+        .args(["-e", "print(1+2+3)"])
+        .output()
+        .expect("inline eval");
+    assert!(eval.status.success());
+    assert_eq!(String::from_utf8_lossy(&eval.stdout).trim(), "6");
+
+    let gas = Command::new(elara)
+        .args(["--gas", "40", "-e", "while true {}"])
+        .output()
+        .expect("gas limit");
+    assert!(!gas.status.success());
+    let err = String::from_utf8_lossy(&gas.stderr);
+    assert!(
+        err.contains("gas") || err.contains("Gas") || err.contains("exhausted"),
+        "stderr={err}"
+    );
+
+    let mem = Command::new(elara)
+        .args(["--mem-limit", "256", "-e", "print(1)"])
+        .output()
+        .expect("mem limit");
+    assert!(
+        !mem.status.success(),
+        "tiny --mem-limit must reject startup/execution; stderr={}",
+        String::from_utf8_lossy(&mem.stderr)
+    );
+}
