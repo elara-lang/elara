@@ -335,19 +335,33 @@ fn run_close_hook(
     }
     if val.is_obj_type(ObjType::Closure) {
         state.push_close_hook(val);
+        // Best-effort invoke so demo defer bodies run; ignore stub/empty protos.
+        let proto = unsafe { (*val.as_obj().cast::<ObjClosure>()).proto };
+        if !proto.is_null() && unsafe { (*proto).code_count > 0 && !(*proto).code.is_null() } {
+            let mut results = [Value::NIL; 1];
+            let _ = unsafe { crate::ffi::c_api::call_value(state, val, &[], &mut results) };
+        }
         return Ok(());
     }
     if val.is_obj_type(ObjType::Table) {
         let mt = unsafe { (*val.as_obj().cast::<ObjTable>()).metatable };
         if mt.is_null() {
-            return Err(ElaraStatus::ErrRuntime);
+            return Err(
+                state.runtime_error("Variable marked with 'defer' has no '__close' metamethod")
+            );
         }
         let mm = unsafe { (*mt).get(state.mm_close) };
         if mm.is_nil() {
-            return Err(ElaraStatus::ErrRuntime);
+            return Err(
+                state.runtime_error("Variable marked with 'defer' has no '__close' metamethod")
+            );
         }
         state.push_close_hook(mm);
+        if mm.is_obj_type(ObjType::Closure) {
+            let mut results = [Value::NIL; 1];
+            let _ = unsafe { crate::ffi::c_api::call_value(state, mm, &[val], &mut results) };
+        }
         return Ok(());
     }
-    Err(ElaraStatus::ErrRuntime)
+    Err(state.runtime_error("Variable marked with 'defer' has no '__close' metamethod"))
 }

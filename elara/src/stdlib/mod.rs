@@ -3,6 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod bit;
+mod fiber;
 mod globals;
 mod math;
 mod string;
@@ -30,15 +31,7 @@ pub unsafe fn intrinsic_module(
         "sys" => unsafe { sys::make_module(state)? },
         "string" => unsafe { string::make_module(state)? },
         "table" => unsafe { table::make_module(state)? },
-        "fiber" => {
-            let t =
-                crate::value::ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 4)
-                    .ok_or(ElaraStatus::ErrOom)?;
-            Value::from_obj(
-                core::ptr::NonNull::new(t.as_ptr().cast()).unwrap(),
-                crate::value::ObjType::Table,
-            )
-        }
+        "fiber" => unsafe { fiber::make_module(state)? },
         _ => return Ok(None),
     }))
 }

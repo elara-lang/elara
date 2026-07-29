@@ -1,0 +1,19 @@
+// Cooperative producer → consumer pipeline via fibers.
+
+fn producer() {
+    yield 1
+    yield 2
+    yield 3
+}
+
+let p = fiber.create(producer)
+print("status={fiber.status(p)}")
+
+let v1 = fiber.resume(p)
+print("got={v1}")
+let v2 = fiber.resume(p)
+print("got={v2}")
+let v3 = fiber.resume(p)
+print("got={v3}")
+fiber.resume(p)
+print("status={fiber.status(p)}")

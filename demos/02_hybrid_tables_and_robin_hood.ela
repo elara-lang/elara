@@ -1,0 +1,28 @@
+// 0-based arrays, hash fields, length, and metatable __tostring / __add.
+
+let nums = {10, 20, 30}
+print("len={#nums}")
+print("nums[0]={nums[0]}")
+print("nums[2]={nums[2]}")
+
+let point = {x: 3, y: 4}
+print("point.x={point.x}")
+
+fn vec_tostring(self) {
+    return "Vec({self.x},{self.y})"
+}
+
+fn vec_add(a, b) {
+    return {x: a.x + b.x, y: a.y + b.y}
+}
+
+let mt = {__tostring: vec_tostring, __add: vec_add}
+table.set_metatable(point, mt)
+let other = {x: 1, y: 2}
+table.set_metatable(other, mt)
+
+print(tostring(point))
+let sum = point + other
+table.set_metatable(sum, mt)
+print(tostring(sum))
+print("sum.x={sum.x}")

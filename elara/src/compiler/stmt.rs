@@ -154,6 +154,25 @@ impl<'a> FunctionScope<'a> {
                 reg,
                 is_const: false,
             } => self.emit_inplace_binop(alloc, reg, op, rhs, line),
+            ExprKind::Upvalue {
+                idx,
+                is_const: false,
+            } => {
+                let tmp = self.alloc_regs(1, line)?;
+                self.emit(
+                    alloc,
+                    Instruction::make_abc(OpCode::GetUpval, tmp, idx, 0),
+                    line,
+                )?;
+                self.emit_inplace_binop(alloc, tmp, op, rhs, line)?;
+                self.emit(
+                    alloc,
+                    Instruction::make_abc(OpCode::SetUpval, tmp, idx, 0),
+                    line,
+                )?;
+                self.free_reg = tmp;
+                Ok(())
+            }
             ExprKind::Local { is_const: true, .. } | ExprKind::Upvalue { is_const: true, .. } => {
                 Err(CompileError::new("Cannot assign to const variable", line))
             }
@@ -263,9 +282,8 @@ impl<'a> FunctionScope<'a> {
                 Instruction::make_asbx(OpCode::ForLoop, loop_base, forloop_sbx);
         }
 
-        // FORPREP jumps forward to the instruction after FORLOOP.
-        let after = self.pc();
-        let forprep_sbx = after as i32 - (forprep_pc as i32 + 1);
+        // FORPREP jumps forward to FORLOOP (init subtracts step; FORLOOP advances into body).
+        let forprep_sbx = forloop_pc as i32 - (forprep_pc as i32 + 1);
         unsafe {
             *(*self.proto).code.add(forprep_pc as usize) =
                 Instruction::make_asbx(OpCode::ForPrep, loop_base, forprep_sbx);
@@ -276,6 +294,7 @@ impl<'a> FunctionScope<'a> {
         }
 
         // Mark FORLOOP as a jump target for peephole safety.
+        let after = self.pc();
         if forloop_pc + 1 > self.last_target_pc {
             self.last_target_pc = after;
         }

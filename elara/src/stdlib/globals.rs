@@ -26,7 +26,40 @@ pub unsafe fn register(state: &mut ElaraState) -> Result<(), ElaraStatus> {
     set_global_fn(state, "assert", native_assert)?;
     set_global_fn(state, "panic", native_panic)?;
     set_global_fn(state, "pcall", native_pcall)?;
+    set_global_fn(state, "__register_close", native_register_close)?;
     Ok(())
+}
+
+unsafe extern "C" fn native_register_close(
+    state: *mut ElaraState,
+    ctx: *mut CallContext,
+) -> ElaraStatus {
+    let s = &mut *state;
+    if argc(ctx) < 2 {
+        return runtime_err(s, "__register_close expects (value, reg)");
+    }
+    let v = arg(ctx, 0);
+    let reg = match arg(ctx, 1).to_i64() {
+        Some(i) if (0..255).contains(&i) => i as u32,
+        _ => return runtime_err(s, "__register_close: bad register index"),
+    };
+    let fiber = s.current_fiber;
+    if fiber.is_null() {
+        ret(ctx, v);
+        return ElaraStatus::Ok;
+    }
+    let f = &mut *fiber;
+    if f.frame_count == 0 {
+        return runtime_err(s, "__register_close: no frame");
+    }
+    let frame = &*f.frames.add(f.frame_count as usize - 1);
+    let slot = frame.base_idx + reg;
+    *f.stack.add(slot as usize) = v;
+    if let Err(e) = f.push_close_slot(&mut s.alloc, slot) {
+        return e;
+    }
+    ret(ctx, v);
+    ElaraStatus::Ok
 }
 
 unsafe extern "C" fn native_type(state: *mut ElaraState, ctx: *mut CallContext) -> ElaraStatus {
