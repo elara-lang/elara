@@ -1,0 +1,7 @@
+// Import an isolated module, exercise exports, and rely on AOT parity via the runner.
+
+import "lib/math_ext" as mx
+
+print("version={mx.VERSION}")
+print("add={mx.add(20, 22)}")
+print("mul={mx.mul(6, 7)}")

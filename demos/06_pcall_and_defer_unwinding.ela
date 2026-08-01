@@ -1,0 +1,15 @@
+// pcall catches panic while defer / __close hooks still run LIFO.
+
+fn boom() {
+    defer { print("defer:inner") }
+    defer { print("defer:outer") }
+    panic("caught-error")
+}
+
+let ok, err = pcall(boom)
+print("ok={ok}")
+print("err={err}")
+
+let ok2, val = pcall(fn() { return 7 })
+print("ok2={ok2}")
+print("val={val}")

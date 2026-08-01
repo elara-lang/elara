@@ -1,0 +1,11 @@
+// Shared math helpers for the modules demo.
+
+export fn add(a, b) {
+    return a + b
+}
+
+export fn mul(a, b) {
+    return a * b
+}
+
+export const VERSION = 1

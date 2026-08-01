@@ -106,6 +106,19 @@ fn main() -> ExitCode {
     }
     unsafe {
         (*state).cli_args = script_args;
+        if let Some(ref path) = file {
+            let mut dirs = Vec::new();
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                let p = parent.to_string_lossy();
+                if !p.is_empty() {
+                    dirs.push(p.into_owned());
+                }
+            }
+            dirs.push(".".to_string());
+            (*state).module_search_dirs = dirs;
+        } else {
+            (*state).module_search_dirs = vec![".".to_string()];
+        }
     }
 
     let status = if let Some(code) = eval_code {

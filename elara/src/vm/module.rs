@@ -107,7 +107,10 @@ pub unsafe fn op_import(
     }
 
     // 2. Intrinsic registry (stdlib modules).
-    if matches!(spec, "math" | "string" | "table" | "bit" | "sys" | "fiber") {
+    if matches!(
+        spec,
+        "math" | "string" | "table" | "bit" | "sys" | "fiber" | "gc"
+    ) {
         if let Some(cap) = module_required_cap(spec)
             && !has_capability(state, cap)
         {
@@ -137,62 +140,87 @@ pub unsafe fn op_import(
         return Err(ElaraStatus::ErrModule);
     }
 
-    // 3. Host custom loader
-    let Some(loader) = state.module_loader else {
-        set_module_error(state, format_args!("Module not found: '{spec}'"));
-        return Err(ElaraStatus::ErrModule);
-    };
-
     (*table)
         .set(&mut state.alloc, spec_val, MODULE_LOADING_SENTINEL)
         .map_err(|_| ElaraStatus::ErrOom)?;
 
-    let c_spec = match CString::new(spec) {
-        Ok(s) => s,
-        Err(_) => {
-            remove_cache_entry(state, table, spec_val);
-            set_module_error(state, format_args!("Invalid module specifier"));
-            return Err(ElaraStatus::ErrModule);
-        }
-    };
+    // 3. Host custom loader
+    if let Some(loader) = state.module_loader {
+        let c_spec = match CString::new(spec) {
+            Ok(s) => s,
+            Err(_) => {
+                remove_cache_entry(state, table, spec_val);
+                set_module_error(state, format_args!("Invalid module specifier"));
+                return Err(ElaraStatus::ErrModule);
+            }
+        };
 
-    let mut out_bytes: *const u8 = core::ptr::null();
-    let mut out_len: usize = 0;
-    let mut out_is_bc = false;
-    let st = loader(
-        state as *mut ElaraState,
-        c_spec.as_ptr(),
-        &mut out_bytes,
-        &mut out_len,
-        &mut out_is_bc,
-        state.module_loader_ud,
-    );
-
-    if st != ElaraStatus::Ok || out_bytes.is_null() || out_len == 0 {
-        remove_cache_entry(state, table, spec_val);
-        if state.error_buf_len == 0
-            && (state.last_error.is_none() || state.last_error == Some("__dynamic__"))
-        {
-            set_module_error(state, format_args!("Module not found: '{spec}'"));
-        }
-        return Err(if st == ElaraStatus::Ok {
-            ElaraStatus::ErrModule
-        } else {
-            st
-        });
-    }
-
-    let bytes = core::slice::from_raw_parts(out_bytes, out_len);
-    if !out_is_bc {
-        remove_cache_entry(state, table, spec_val);
-        set_module_error(
-            state,
-            format_args!("source module loading requires the compiler pipeline"),
+        let mut out_bytes: *const u8 = core::ptr::null();
+        let mut out_len: usize = 0;
+        let mut out_is_bc = false;
+        let st = loader(
+            state as *mut ElaraState,
+            c_spec.as_ptr(),
+            &mut out_bytes,
+            &mut out_len,
+            &mut out_is_bc,
+            state.module_loader_ud,
         );
-        return Err(ElaraStatus::ErrModule);
+
+        if st == ElaraStatus::Ok && !out_bytes.is_null() && out_len > 0 {
+            let bytes = core::slice::from_raw_parts(out_bytes, out_len);
+            let result = if out_is_bc {
+                load_and_run_bytecode(state, bytes)
+            } else {
+                let src = match core::str::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        remove_cache_entry(state, table, spec_val);
+                        set_module_error(state, format_args!("Module source is not valid UTF-8"));
+                        return Err(ElaraStatus::ErrModule);
+                    }
+                };
+                compile_and_run_module_source(state, spec, src)
+            };
+            return finish_module_load(state, table, spec_val, base, a, result);
+        }
     }
 
-    match load_and_run_bytecode(state, bytes) {
+    // 4. Filesystem search when SYS_ENV (or full) capabilities allow it.
+    if has_capability(state, crate::ffi::sandbox::ELARA_CAP_SYS_ENV)
+        && let Some((is_bc, owned)) = read_module_from_filesystem(state, spec)
+    {
+        let result = if is_bc {
+            load_and_run_bytecode(state, &owned)
+        } else {
+            let src_owned = match core::str::from_utf8(&owned) {
+                Ok(s) => s.to_owned(),
+                Err(_) => {
+                    remove_cache_entry(state, table, spec_val);
+                    set_module_error(state, format_args!("Module source is not valid UTF-8"));
+                    return Err(ElaraStatus::ErrModule);
+                }
+            };
+            compile_and_run_module_source(state, spec, &src_owned)
+        };
+        state.module_load_buf = owned;
+        return finish_module_load(state, table, spec_val, base, a, result);
+    }
+
+    remove_cache_entry(state, table, spec_val);
+    set_module_error(state, format_args!("Module not found: '{spec}'"));
+    Err(ElaraStatus::ErrModule)
+}
+
+unsafe fn finish_module_load(
+    state: &mut ElaraState,
+    table: *mut ObjTable,
+    spec_val: Value,
+    base: *mut Value,
+    a: u8,
+    result: Result<Value, ElaraStatus>,
+) -> Result<(), ElaraStatus> {
+    match result {
         Ok(exports) => {
             (*table)
                 .set(&mut state.alloc, spec_val, exports)
@@ -208,6 +236,51 @@ pub unsafe fn op_import(
     }
 }
 
+fn read_module_from_filesystem(state: &ElaraState, spec: &str) -> Option<(bool, Vec<u8>)> {
+    let mut dirs: Vec<String> = state.module_search_dirs.clone();
+    if dirs.is_empty() {
+        dirs.push(".".to_string());
+    }
+    let candidates = [
+        format!("{spec}.elac"),
+        format!("{spec}.ela"),
+        spec.to_string(),
+    ];
+    for dir in &dirs {
+        for name in &candidates {
+            let path = if dir == "." {
+                name.clone()
+            } else {
+                format!("{dir}/{name}")
+            };
+            if let Ok(data) = std::fs::read(&path) {
+                let is_bc = data.len() >= 6 && data[0] == 0x1B && &data[1..6] == b"ELARA";
+                return Some((is_bc, data));
+            }
+        }
+    }
+    None
+}
+
+unsafe fn compile_and_run_module_source(
+    state: &mut ElaraState,
+    chunk_name: &str,
+    source: &str,
+) -> Result<Value, ElaraStatus> {
+    let proto = match crate::compiler::compile_module(state, chunk_name, source) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::compiler::set_compile_error(state, &e);
+            return Err(ElaraStatus::ErrSyntax);
+        }
+    };
+    if let Err(msg) = crate::vm::verify_proto(&*proto, None) {
+        state.last_error = Some(msg);
+        return Err(ElaraStatus::ErrVerify);
+    }
+    run_module_proto(state, proto)
+}
+
 unsafe fn remove_cache_entry(state: &mut ElaraState, table: *mut ObjTable, key: Value) {
     let _ = (*table).set(&mut state.alloc, key, Value::NIL);
 }
@@ -217,8 +290,16 @@ unsafe fn load_and_run_bytecode(
     bytes: &[u8],
 ) -> Result<Value, ElaraStatus> {
     let proto = deserialize_elac(state, bytes)?;
+    run_module_proto(state, proto)
+}
+
+unsafe fn run_module_proto(
+    state: &mut ElaraState,
+    proto: *mut crate::compiler::ObjProto,
+) -> Result<Value, ElaraStatus> {
     let closure = ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, proto)
         .ok_or(ElaraStatus::ErrOom)?;
+    crate::compiler::bind_env_upvalue(state, closure.as_ptr())?;
     let stack_slots = (1 + (*proto).max_stack_size as u32).max(16);
     let mut fiber = ObjFiber::new(&mut state.alloc, &mut state.all_objects, 0, stack_slots, 8)
         .ok_or(ElaraStatus::ErrOom)?;

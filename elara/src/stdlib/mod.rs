@@ -4,6 +4,7 @@
 
 mod bit;
 mod fiber;
+mod gc;
 mod globals;
 mod math;
 mod string;
@@ -32,6 +33,7 @@ pub unsafe fn intrinsic_module(
         "string" => unsafe { string::make_module(state)? },
         "table" => unsafe { table::make_module(state)? },
         "fiber" => unsafe { fiber::make_module(state)? },
+        "gc" => unsafe { gc::make_module(state)? },
         _ => return Ok(None),
     }))
 }

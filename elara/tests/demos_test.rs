@@ -33,14 +33,15 @@ fn all_ela_demos_execute_identically_from_source_and_aot_elac_bytecode() {
     let elarac = env!("CARGO_BIN_EXE_elarac");
     let files = demo_files();
     assert!(
-        files.len() >= 4,
-        "expected demos 01..04 present, found {}",
+        files.len() >= 7,
+        "expected demos 01..07 present, found {}",
         files.len()
     );
 
     for src in &files {
         let name = src.file_stem().unwrap().to_string_lossy();
-        let bc = std::env::temp_dir().join(format!("{name}.elac"));
+        // Keep `.elac` beside the source so relative `import` search dirs resolve.
+        let bc = src.with_extension("elac");
 
         let from_src = Command::new(elara)
             .arg(src)

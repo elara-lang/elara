@@ -67,6 +67,10 @@ pub struct ElaraState {
     pub exit_code: Option<i32>,
     /// CLI script arguments exposed as `sys.args`.
     pub cli_args: Vec<String>,
+    /// Directories searched for `import` filesystem modules (script dir, cwd, …).
+    pub module_search_dirs: Vec<String>,
+    /// Scratch buffer for the most recent filesystem / host module load.
+    pub module_load_buf: Vec<u8>,
 }
 
 impl ElaraState {

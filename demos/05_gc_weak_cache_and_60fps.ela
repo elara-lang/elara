@@ -1,0 +1,29 @@
+// Incremental GC step budget, 64-bit bitwise math, and weak-value cache eviction.
+
+let big = math.max_int
+let masked = bit.band(big, bit.shl(1, 40) - 1)
+print("bits={masked}")
+
+let done = gc.step(500)
+print("gc_step_done={done}")
+
+let cache = {}
+table.set_metatable(cache, {__mode: "v"})
+
+let pinned = {id: 1}
+cache.keep = pinned
+
+// Populate the weak entry inside a call frame so the only remaining root is the cache.
+fn seed_weak(c) {
+    c.drop = {id: 2}
+}
+seed_weak(cache)
+
+gc.collect()
+
+print("pinned={cache.keep.id}")
+if cache.drop {
+    print("weak_cleared=false")
+} else {
+    print("weak_cleared=true")
+}
