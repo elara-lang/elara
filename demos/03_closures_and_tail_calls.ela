@@ -1,0 +1,36 @@
+// Nested closures, factory capture, and a long recursive countdown.
+
+fn make_counter(start) {
+    let n = start
+    fn tick() {
+        n += 1
+        return n
+    }
+    return tick
+}
+
+let c = make_counter(0)
+print("tick={c()}")
+print("tick={c()}")
+
+fn make_holder(v) {
+    return fn() { return v }
+}
+
+let captured = {}
+for i in 0..3 {
+    table.push(captured, make_holder(i))
+}
+print("cap0={captured[0]()}")
+print("cap2={captured[2]()}")
+
+fn countdown(n, acc) {
+    if n <= 0 {
+        return acc
+    }
+    return countdown(n - 1, acc + n)
+}
+
+// 1000 steps stays well within gas while exercising deep recursion / TCO path.
+let total = countdown(1000, 0)
+print("sum={total}")

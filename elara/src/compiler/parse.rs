@@ -18,6 +18,7 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token<'a>,
     previous: Token<'a>,
+    lookahead: Option<Token<'a>>,
     scopes: Vec<FunctionScope<'a>>,
     scratch: Vec<u8>,
 }
@@ -36,6 +37,7 @@ impl<'a> Parser<'a> {
                 line: 1,
                 column: 1,
             },
+            lookahead: None,
             scopes: vec![root],
             scratch: Vec::new(),
         }
@@ -85,6 +87,12 @@ impl<'a> Parser<'a> {
             self.parse_if()
         } else if self.match_tok(TokenKind::KwWhile) {
             self.parse_while()
+        } else if self.match_tok(TokenKind::KwFor) {
+            self.parse_for()
+        } else if self.match_tok(TokenKind::KwDefer) {
+            self.parse_defer()
+        } else if self.match_tok(TokenKind::KwYield) {
+            self.parse_yield_stmt()
         } else if self.match_tok(TokenKind::KwBreak) {
             let line = self.previous.line;
             let (scope, state) = self.sa();
@@ -223,8 +231,7 @@ impl<'a> Parser<'a> {
         let mut nparams = 0u8;
         if !self.check(TokenKind::RParen) {
             loop {
-                self.consume(TokenKind::Ident, "Expected parameter name")?;
-                let pname = self.previous.lexeme;
+                let pname = self.consume_param_name()?;
                 let pline = self.previous.line;
                 child_scope.declare_local(pname, false, false, pline)?;
                 child_scope.mark_initialized();
@@ -281,14 +288,39 @@ impl<'a> Parser<'a> {
                 line,
             )?;
         } else {
+            // Detect `return f(...)` for possible OP_TAILCALL.
             let e = self.parse_expression()?;
             let (scope, state) = self.sa();
-            let reg = scope.expr_to_any_reg(&mut state.alloc, e, line)?;
-            scope.emit(
-                &mut state.alloc,
-                Instruction::make_abc(OpCode::Return, reg, 2, 0),
-                line,
-            )?;
+            if let ExprKind::NonReloc { reg } = e.kind {
+                // If the last emitted op was CALL at `reg`, rewrite to TailCall when safe.
+                let pc = scope.pc();
+                if pc > 0 {
+                    let prev = unsafe { *(*scope.proto).code.add((pc - 1) as usize) };
+                    if prev.opcode_raw() == OpCode::Call as u8 && prev.a() == reg {
+                        let b = prev.b();
+                        if !scope.has_active_defer() {
+                            unsafe {
+                                *(*scope.proto).code.add((pc - 1) as usize) =
+                                    Instruction::make_abc(OpCode::TailCall, reg, b, 0);
+                            }
+                            let _ = self.match_tok(TokenKind::Semicolon);
+                            return Ok(());
+                        }
+                    }
+                }
+                scope.emit(
+                    &mut state.alloc,
+                    Instruction::make_abc(OpCode::Return, reg, 2, 0),
+                    line,
+                )?;
+            } else {
+                let reg = scope.expr_to_any_reg(&mut state.alloc, e, line)?;
+                scope.emit(
+                    &mut state.alloc,
+                    Instruction::make_abc(OpCode::Return, reg, 2, 0),
+                    line,
+                )?;
+            }
         }
         let _ = self.match_tok(TokenKind::Semicolon);
         Ok(())
@@ -357,8 +389,10 @@ impl<'a> Parser<'a> {
     fn emit_condition_jump(&mut self, mut cond: ExprDesc, line: u32) -> Result<u32, CompileError> {
         if matches!(cond.kind, ExprKind::Jump { .. }) {
             let (scope, _) = self.sa();
+            // Invert so the fused CMP+JMP is taken when the condition is falsy, then return
+            // that jump list (now in `patch_false` after the true/false swap).
             scope.invert_condition(&mut cond);
-            return Ok(cond.patch_true);
+            return Ok(cond.patch_false);
         }
         let (scope, state) = self.sa();
         let reg = scope.expr_to_any_reg(&mut state.alloc, cond, line)?;
@@ -382,7 +416,20 @@ impl<'a> Parser<'a> {
             if lbp == 0 || lbp < min_bp {
                 break;
             }
-            if self.current.kind == TokenKind::Assign {
+            if matches!(
+                self.current.kind,
+                TokenKind::Assign
+                    | TokenKind::PlusAssign
+                    | TokenKind::MinusAssign
+                    | TokenKind::StarAssign
+                    | TokenKind::SlashAssign
+                    | TokenKind::PercentAssign
+                    | TokenKind::AmpAssign
+                    | TokenKind::PipeAssign
+                    | TokenKind::CaretAssign
+                    | TokenKind::ShlAssign
+                    | TokenKind::ShrAssign
+            ) {
                 left = self.parse_assign(left)?;
                 continue;
             }
@@ -443,7 +490,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwNil => Ok(ExprDesc::new(ExprKind::Nil)),
             TokenKind::KwTrue => Ok(ExprDesc::new(ExprKind::True)),
             TokenKind::KwFalse => Ok(ExprDesc::new(ExprKind::False)),
-            TokenKind::Ident => {
+            TokenKind::Ident | TokenKind::KwSelf => {
                 let state = unsafe { &mut *self.state };
                 let kind = resolve_variable(&mut state.alloc, &mut self.scopes, tok.lexeme, line)?;
                 Ok(ExprDesc::new(kind))
@@ -468,11 +515,91 @@ impl<'a> Parser<'a> {
                 let (scope, state) = self.sa();
                 scope.compile_unop(&mut state.alloc, UnOp::BNot, rhs, line)
             }
+            TokenKind::Hash => {
+                let rhs = self.parse_precedence(TokenKind::Hash.prefix_binding_power())?;
+                let (scope, state) = self.sa();
+                let reg = scope.expr_to_any_reg(&mut state.alloc, rhs, line)?;
+                let dst = scope.alloc_regs(1, line)?;
+                scope.emit(
+                    &mut state.alloc,
+                    Instruction::make_abc(OpCode::Len, dst, reg, 0),
+                    line,
+                )?;
+                Ok(ExprDesc::new(ExprKind::NonReloc { reg: dst }))
+            }
+            TokenKind::LBrace => self.parse_table_literal(line),
+            TokenKind::InterpStart => self.parse_interpolation(tok, line),
+            TokenKind::KwFn => self.parse_anon_fn(line),
             other => Err(CompileError::new(
                 format!("Unexpected token in expression: {other:?}"),
                 line,
             )),
         }
+    }
+
+    fn parse_anon_fn(&mut self, line: u32) -> Result<ExprDesc, CompileError> {
+        let name = "__anon";
+        let (child, mut child_scope) = {
+            let state = self.st();
+            let child_name = state
+                .strings
+                .new_string(&mut state.alloc, &mut state.all_objects, 0, name.as_bytes())
+                .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            let child = ObjProto::new(
+                &mut state.alloc,
+                &mut state.all_objects,
+                0,
+                child_name.as_ptr(),
+            )
+            .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            let dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 8)
+                .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            (child, FunctionScope::new(child.as_ptr(), dedup.as_ptr()))
+        };
+        self.consume(TokenKind::LParen, "Expected '('")?;
+        let mut nparams = 0u8;
+        if !self.check(TokenKind::RParen) {
+            loop {
+                let pname = self.consume_param_name()?;
+                let pline = self.previous.line;
+                child_scope.declare_local(pname, false, false, pline)?;
+                child_scope.mark_initialized();
+                nparams = nparams
+                    .checked_add(1)
+                    .ok_or_else(|| CompileError::new("Too many parameters", pline))?;
+                if !self.match_tok(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RParen, "Expected ')'")?;
+        unsafe {
+            (*child.as_ptr()).num_params = nparams;
+        }
+        self.scopes.push(child_scope);
+        self.parse_block()?;
+        let mut finished = self.scopes.pop().expect("anon fn scope");
+        {
+            let state = self.st();
+            finished.emit(
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Return, 0, 1, 0),
+                line,
+            )?;
+        }
+        let (scope, state) = self.sa();
+        let dst = scope.alloc_regs(1, line)?;
+        let bx = unsafe {
+            (*scope.proto)
+                .add_child_proto(&mut state.alloc, child.as_ptr())
+                .map_err(|e| CompileError::new(e, line))?
+        };
+        scope.emit(
+            &mut state.alloc,
+            Instruction::make_abx(OpCode::Closure, dst, bx),
+            line,
+        )?;
+        Ok(ExprDesc::new(ExprKind::NonReloc { reg: dst }))
     }
 
     fn infix(
@@ -554,9 +681,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assign(&mut self, left: ExprDesc) -> Result<ExprDesc, CompileError> {
+        let op = self.current.kind;
         let line = self.current.line;
-        self.advance(); // '='
+        self.advance();
         let right = self.parse_precedence(TokenKind::Assign.binding_power().1)?;
+        if op != TokenKind::Assign {
+            let bin = match op {
+                TokenKind::PlusAssign => BinOp::Add,
+                TokenKind::MinusAssign => BinOp::Sub,
+                TokenKind::StarAssign => BinOp::Mul,
+                TokenKind::SlashAssign => BinOp::Div,
+                TokenKind::PercentAssign => BinOp::Mod,
+                TokenKind::AmpAssign => BinOp::Band,
+                TokenKind::PipeAssign => BinOp::Bor,
+                TokenKind::CaretAssign => BinOp::Bxor,
+                TokenKind::ShlAssign => BinOp::Shl,
+                TokenKind::ShrAssign => BinOp::Shr,
+                _ => return Err(CompileError::new("Invalid compound assignment", line)),
+            };
+            let (scope, state) = self.sa();
+            scope.compile_compound_assign(&mut state.alloc, left, bin, right, line)?;
+            return Ok(ExprDesc::new(ExprKind::Void));
+        }
         match left.kind {
             ExprKind::Local { reg, is_const } => {
                 if is_const {
@@ -611,7 +757,6 @@ impl<'a> Parser<'a> {
         self.consume(TokenKind::LParen, "Expected '('")?;
         let base = {
             let (scope, state) = self.sa();
-            scope.reset_regs();
             let base = scope.free_reg;
             let _ = scope.alloc_regs(1, line)?;
             scope.discharge_to_reg(&mut state.alloc, callee, base, line)?;
@@ -622,9 +767,15 @@ impl<'a> Parser<'a> {
             loop {
                 let arg = self.parse_expression()?;
                 let (scope, state) = self.sa();
-                let reg = scope.free_reg;
-                let _ = scope.alloc_regs(1, line)?;
-                scope.discharge_to_reg(&mut state.alloc, arg, reg, line)?;
+                let dest = base
+                    .checked_add(1)
+                    .and_then(|b| b.checked_add(nargs))
+                    .ok_or_else(|| CompileError::new("Too many arguments", line))?;
+                while scope.free_reg <= dest {
+                    let _ = scope.alloc_regs(1, line)?;
+                }
+                scope.discharge_to_reg(&mut state.alloc, arg, dest, line)?;
+                scope.free_reg = dest.saturating_add(1);
                 nargs = nargs
                     .checked_add(1)
                     .ok_or_else(|| CompileError::new("Too many arguments", line))?;
@@ -678,6 +829,452 @@ impl<'a> Parser<'a> {
         Ok(ExprDesc::new(ExprKind::Indexed { table_reg, key_reg }))
     }
 
+    fn parse_table_literal(&mut self, line: u32) -> Result<ExprDesc, CompileError> {
+        // `{` already consumed as prefix previous.
+        let (dst, mut builder) = {
+            let (scope, state) = self.sa();
+            let dst = scope.alloc_regs(1, line)?;
+            let builder = scope.begin_table(&mut state.alloc, dst, line)?;
+            (dst, builder)
+        };
+        let mut array_batch = 0u8;
+        if !self.check(TokenKind::RBrace) {
+            loop {
+                if self.check(TokenKind::Ident) && self.check_ahead(TokenKind::Colon) {
+                    self.advance();
+                    let field = self.previous.lexeme;
+                    self.consume(TokenKind::Colon, "Expected ':'")?;
+                    let val = self.parse_expression()?;
+                    let (scope, state) = self.sa();
+                    let key_k = ensure_string_constant(
+                        scope,
+                        &mut state.alloc,
+                        &mut state.all_objects,
+                        &mut state.strings,
+                        field.as_bytes(),
+                        line,
+                    )?;
+                    let key_u8 = u8::try_from(key_k)
+                        .map_err(|_| CompileError::new("field name K index > 255", line))?;
+                    let val_reg = scope.expr_to_any_reg(&mut state.alloc, val, line)?;
+                    scope.table_setfield(&mut state.alloc, &mut builder, key_u8, val_reg, line)?;
+                } else if self.check(TokenKind::LBracket) {
+                    self.advance();
+                    let key = self.parse_expression()?;
+                    self.consume(TokenKind::RBracket, "Expected ']'")?;
+                    self.consume(TokenKind::Assign, "Expected '=' in table field")?;
+                    let val = self.parse_expression()?;
+                    let (scope, state) = self.sa();
+                    let key_reg = scope.expr_to_any_reg(&mut state.alloc, key, line)?;
+                    let val_reg = scope.expr_to_any_reg(&mut state.alloc, val, line)?;
+                    scope.table_settab(&mut state.alloc, &mut builder, key_reg, val_reg, line)?;
+                } else {
+                    let elem = self.parse_expression()?;
+                    let (scope, state) = self.sa();
+                    let reg = builder.dst + 1 + array_batch;
+                    while scope.free_reg <= reg {
+                        let _ = scope.alloc_regs(1, line)?;
+                    }
+                    scope.discharge_to_reg(&mut state.alloc, elem, reg, line)?;
+                    array_batch = array_batch.saturating_add(1);
+                    if array_batch == 50 {
+                        let base = builder.array_items;
+                        scope.table_setlist(
+                            &mut state.alloc,
+                            &mut builder,
+                            array_batch,
+                            base,
+                            line,
+                        )?;
+                        array_batch = 0;
+                    }
+                }
+                if !self.match_tok(TokenKind::Comma) {
+                    break;
+                }
+                if self.check(TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RBrace, "Expected '}'")?;
+        let (scope, state) = self.sa();
+        if array_batch > 0 {
+            let base = builder.array_items;
+            scope.table_setlist(&mut state.alloc, &mut builder, array_batch, base, line)?;
+        }
+        scope.finish_table(builder);
+        scope.free_reg = dst + 1;
+        Ok(ExprDesc::new(ExprKind::NonReloc { reg: dst }))
+    }
+
+    fn parse_interpolation(
+        &mut self,
+        start: Token<'a>,
+        line: u32,
+    ) -> Result<ExprDesc, CompileError> {
+        // `"prefix {` … `} suffix"` → CONCAT_N of parts (tostring of exprs).
+        let mut parts: Vec<ExprDesc> = Vec::new();
+        let prefix = Self::interp_prefix_slice(start.lexeme);
+        if !prefix.is_empty() {
+            parts.push(self.string_const_expr(prefix, line)?);
+        }
+        loop {
+            let expr = self.parse_expression()?;
+            // Coerce via tostring if available.
+            let coerced = self.call_tostring(expr, line)?;
+            parts.push(coerced);
+            if self.check(TokenKind::InterpMid) {
+                self.advance();
+                let mid = Self::interp_mid_slice(self.previous.lexeme);
+                if !mid.is_empty() {
+                    parts.push(self.string_const_expr(mid, line)?);
+                }
+                continue;
+            }
+            if self.check(TokenKind::InterpEnd) {
+                self.advance();
+                let end = Self::interp_end_slice(self.previous.lexeme);
+                if !end.is_empty() {
+                    parts.push(self.string_const_expr(end, line)?);
+                }
+                break;
+            }
+            return Err(CompileError::new("Unterminated string interpolation", line));
+        }
+        self.emit_concat_parts(parts, line)
+    }
+
+    fn call_tostring(&mut self, e: ExprDesc, line: u32) -> Result<ExprDesc, CompileError> {
+        // Materialize tostring(e) when possible; otherwise use value as-is (Concat handles numbers).
+        let state = unsafe { &mut *self.state };
+        let kind = resolve_variable(&mut state.alloc, &mut self.scopes, "tostring", line);
+        let Ok(ts) = kind else {
+            return Ok(e);
+        };
+        let callee = ExprDesc::new(ts);
+        let (scope, state) = self.sa();
+        let base = scope.free_reg;
+        let _ = scope.alloc_regs(1, line)?;
+        scope.discharge_to_reg(&mut state.alloc, callee, base, line)?;
+        let dest = base + 1;
+        while scope.free_reg <= dest {
+            let _ = scope.alloc_regs(1, line)?;
+        }
+        scope.discharge_to_reg(&mut state.alloc, e, dest, line)?;
+        scope.free_reg = dest + 1;
+        scope.emit(
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Call, base, 2, 2),
+            line,
+        )?;
+        scope.free_reg = base + 1;
+        Ok(ExprDesc::new(ExprKind::NonReloc { reg: base }))
+    }
+
+    fn emit_concat_parts(
+        &mut self,
+        parts: Vec<ExprDesc>,
+        line: u32,
+    ) -> Result<ExprDesc, CompileError> {
+        if parts.is_empty() {
+            return self.string_const_expr("", line);
+        }
+        if parts.len() == 1 {
+            return Ok(parts.into_iter().next().unwrap());
+        }
+        let (scope, state) = self.sa();
+        let base = scope.free_reg;
+        for (i, part) in parts.into_iter().enumerate() {
+            let reg = base + i as u8;
+            while scope.free_reg <= reg {
+                let _ = scope.alloc_regs(1, line)?;
+            }
+            scope.discharge_to_reg(&mut state.alloc, part, reg, line)?;
+            scope.free_reg = reg + 1;
+        }
+        let n = scope.free_reg - base;
+        let dst = base;
+        scope.emit(
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::ConcatN, dst, base, n),
+            line,
+        )?;
+        scope.free_reg = dst + 1;
+        Ok(ExprDesc::new(ExprKind::NonReloc { reg: dst }))
+    }
+
+    fn string_const_expr(&mut self, raw: &str, line: u32) -> Result<ExprDesc, CompileError> {
+        let (scope, state) = self.sa();
+        let s = state
+            .strings
+            .new_string(&mut state.alloc, &mut state.all_objects, 0, raw.as_bytes())
+            .ok_or_else(|| CompileError::new("Out of memory", line))?;
+        let v = Value::from_obj(s.cast(), ObjType::String);
+        let kind = scope.value_to_expr_kind(&mut state.alloc, v, line)?;
+        Ok(ExprDesc::new(kind))
+    }
+
+    fn parse_for(&mut self) -> Result<(), CompileError> {
+        self.consume(TokenKind::Ident, "Expected loop variable")?;
+        let var = self.previous.lexeme;
+        let line = self.previous.line;
+        self.consume(TokenKind::KwIn, "Expected 'in'")?;
+        // Binding power > range (80) so `0..n` is not consumed as one expression.
+        let start = self.parse_precedence(81)?;
+        let inclusive = if self.match_tok(TokenKind::DotDotEq) {
+            true
+        } else {
+            self.consume(TokenKind::DotDot, "Expected '..' or '..='")?;
+            false
+        };
+        let end = self.parse_precedence(81)?;
+        self.consume(TokenKind::LBrace, "Expected '{'")?;
+
+        // Manual range-for mirroring `compile_range_for`, with body statements parsed here.
+        let loop_base = {
+            let (scope, state) = self.sa();
+            let loop_base = scope.alloc_regs(4, line)?;
+            scope.discharge_to_reg(&mut state.alloc, start, loop_base, line)?;
+            scope.discharge_to_reg(&mut state.alloc, end, loop_base + 1, line)?;
+            if inclusive {
+                scope.emit(
+                    &mut state.alloc,
+                    Instruction::make_abc(OpCode::AddI, loop_base + 1, loop_base + 1, 1u8),
+                    line,
+                )?;
+            }
+            scope.emit(
+                &mut state.alloc,
+                Instruction::make_asbx(OpCode::LoadI, loop_base + 2, 1),
+                line,
+            )?;
+            loop_base
+        };
+        let forprep_pc = {
+            let (scope, state) = self.sa();
+            scope.emit(
+                &mut state.alloc,
+                Instruction::make_asbx(OpCode::ForPrep, loop_base, 0),
+                line,
+            )?
+        };
+        {
+            let scope = self.scopes.last_mut().unwrap();
+            scope.loops.push(LoopScope {
+                continue_target_pc: forprep_pc + 1,
+                break_jump_list: NO_JUMP,
+                scope_depth: scope.scope_depth,
+                first_local_reg: loop_base,
+            });
+            scope.begin_scope();
+            scope.locals.push(crate::compiler::scope::Local {
+                name: var,
+                depth: scope.scope_depth as i16,
+                reg: loop_base + 3,
+                is_const: false,
+                is_captured: false,
+                has_close: false,
+                inline_const: None,
+            });
+            scope.free_reg = (loop_base + 4).max(scope.free_reg);
+        }
+        while !self.check(TokenKind::RBrace) && !self.check(TokenKind::Eof) {
+            self.declaration()?;
+            self.scopes.last_mut().unwrap().reset_regs();
+        }
+        self.consume(TokenKind::RBrace, "Expected '}'")?;
+        let line_end = self.previous.line;
+        {
+            let (scope, state) = self.sa();
+            scope.end_scope(&mut state.alloc, line_end)?;
+            let forloop_pc = scope.emit(
+                &mut state.alloc,
+                Instruction::make_asbx(OpCode::ForLoop, loop_base, 0),
+                line_end,
+            )?;
+            let body_pc = forprep_pc + 1;
+            let forloop_sbx = body_pc as i32 - (forloop_pc as i32 + 1);
+            unsafe {
+                *(*scope.proto).code.add(forloop_pc as usize) =
+                    Instruction::make_asbx(OpCode::ForLoop, loop_base, forloop_sbx);
+            }
+            // FORPREP jumps to FORLOOP (which advances and jumps back to body).
+            let forprep_sbx = forloop_pc as i32 - (forprep_pc as i32 + 1);
+            unsafe {
+                *(*scope.proto).code.add(forprep_pc as usize) =
+                    Instruction::make_asbx(OpCode::ForPrep, loop_base, forprep_sbx);
+            }
+            if let Some(lp) = scope.loops.pop() {
+                scope.patch_jump_list_to_here(lp.break_jump_list);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_defer(&mut self) -> Result<(), CompileError> {
+        let line = self.previous.line;
+        // `defer { ... }` → closure + register_close.
+        if !self.check(TokenKind::LBrace) {
+            return Err(CompileError::new("Expected '{' after defer", line));
+        }
+        // Build a zero-arg function from the block by reusing compile_function_body shape.
+        let name = "__defer";
+        let child = {
+            let state = self.st();
+            let child_name = state
+                .strings
+                .new_string(&mut state.alloc, &mut state.all_objects, 0, name.as_bytes())
+                .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            let child = ObjProto::new(
+                &mut state.alloc,
+                &mut state.all_objects,
+                0,
+                child_name.as_ptr(),
+            )
+            .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            let dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 8)
+                .ok_or_else(|| CompileError::new("Out of memory", line))?;
+            (child, FunctionScope::new(child.as_ptr(), dedup.as_ptr()))
+        };
+        let (child, child_scope) = child;
+        self.scopes.push(child_scope);
+        self.parse_block()?;
+        let mut finished = self.scopes.pop().expect("defer scope");
+        {
+            let state = self.st();
+            finished.emit(
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Return, 0, 1, 0),
+                line,
+            )?;
+        }
+        let reg = {
+            let (scope, state) = self.sa();
+            let reg = scope.declare_local(name, true, true, line)?;
+            let bx = unsafe {
+                (*scope.proto)
+                    .add_child_proto(&mut state.alloc, child.as_ptr())
+                    .map_err(|e| CompileError::new(e, line))?
+            };
+            scope.emit(
+                &mut state.alloc,
+                Instruction::make_abx(OpCode::Closure, reg, bx),
+                line,
+            )?;
+            scope.mark_initialized();
+            reg
+        };
+        // Register close slot via intrinsic `__register_close`.
+        self.emit_register_close(reg, line)?;
+        let _ = self.match_tok(TokenKind::Semicolon);
+        Ok(())
+    }
+
+    fn emit_register_close(&mut self, reg: u8, line: u32) -> Result<(), CompileError> {
+        let state = unsafe { &mut *self.state };
+        let kind = resolve_variable(&mut state.alloc, &mut self.scopes, "__register_close", line)?;
+        let (scope, state) = self.sa();
+        let base = scope.free_reg;
+        let _ = scope.alloc_regs(1, line)?;
+        scope.discharge_to_reg(&mut state.alloc, ExprDesc::new(kind), base, line)?;
+        let dest = base + 1;
+        while scope.free_reg <= dest + 1 {
+            let _ = scope.alloc_regs(1, line)?;
+        }
+        scope.emit_move(&mut state.alloc, dest, reg, line)?;
+        scope.emit(
+            &mut state.alloc,
+            Instruction::make_asbx(OpCode::LoadI, dest + 1, i32::from(reg)),
+            line,
+        )?;
+        scope.free_reg = dest + 2;
+        scope.emit(
+            &mut state.alloc,
+            Instruction::make_abc(OpCode::Call, base, 3, 2),
+            line,
+        )?;
+        scope.reset_regs();
+        Ok(())
+    }
+
+    fn parse_yield_stmt(&mut self) -> Result<(), CompileError> {
+        let line = self.previous.line;
+        if self.check(TokenKind::Semicolon)
+            || self.check(TokenKind::RBrace)
+            || self.check(TokenKind::Eof)
+        {
+            let (scope, state) = self.sa();
+            scope.emit(
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Yield, 0, 1, 0),
+                line,
+            )?;
+        } else {
+            let e = self.parse_expression()?;
+            let (scope, state) = self.sa();
+            let reg = scope.expr_to_any_reg(&mut state.alloc, e, line)?;
+            scope.emit(
+                &mut state.alloc,
+                Instruction::make_abc(OpCode::Yield, reg, 2, 0),
+                line,
+            )?;
+        }
+        let _ = self.match_tok(TokenKind::Semicolon);
+        Ok(())
+    }
+
+    fn check_ahead(&mut self, kind: TokenKind) -> bool {
+        if self.lookahead.is_none() {
+            self.lookahead = Some(self.lexer.next_token());
+        }
+        self.lookahead.unwrap().kind == kind
+    }
+
+    fn consume_param_name(&mut self) -> Result<&'a str, CompileError> {
+        if self.match_tok(TokenKind::Ident) || self.match_tok(TokenKind::KwSelf) {
+            Ok(self.previous.lexeme)
+        } else {
+            Err(CompileError::new(
+                "Expected parameter name",
+                self.current.line,
+            ))
+        }
+    }
+
+    fn interp_prefix_slice(lexeme: &'a str) -> &'a str {
+        // `"prefix {` or `"""prefix {`
+        let b = lexeme.as_bytes();
+        if b.starts_with(b"\"\"\"") {
+            &lexeme[3..lexeme.len().saturating_sub(1)]
+        } else if b.starts_with(b"\"") {
+            &lexeme[1..lexeme.len().saturating_sub(1)]
+        } else {
+            ""
+        }
+    }
+
+    fn interp_mid_slice(lexeme: &'a str) -> &'a str {
+        // `} middle {`
+        if lexeme.len() >= 2 {
+            &lexeme[1..lexeme.len() - 1]
+        } else {
+            ""
+        }
+    }
+
+    fn interp_end_slice(lexeme: &'a str) -> &'a str {
+        // `} suffix"` or `} suffix"""`
+        let b = lexeme.as_bytes();
+        if b.ends_with(b"\"\"\"") {
+            &lexeme[1..lexeme.len() - 3]
+        } else if b.ends_with(b"\"") {
+            &lexeme[1..lexeme.len() - 1]
+        } else {
+            ""
+        }
+    }
+
     fn string_token_inner_slice(lexeme: &'a str) -> &'a str {
         let b = lexeme.as_bytes();
         if b.len() >= 6 && b.starts_with(b"\"\"\"") && b.ends_with(b"\"\"\"") {
@@ -691,7 +1288,11 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) {
         self.previous = self.current;
-        self.current = self.lexer.next_token();
+        self.current = if let Some(t) = self.lookahead.take() {
+            t
+        } else {
+            self.lexer.next_token()
+        };
     }
 
     fn check(&self, kind: TokenKind) -> bool {

@@ -1,0 +1,16 @@
+// Lexical rules, let/const, compound assignment, interpolation, and defer LIFO cleanup.
+
+const title = "Elara"
+let count = 10
+count += 5
+count -= 1
+
+print("Status: {title} count={count}")
+
+{
+    defer { print("defer: second") }
+    defer { print("defer: first") }
+    print("body")
+}
+
+print("done")

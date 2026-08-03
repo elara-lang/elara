@@ -18,8 +18,15 @@ use crate::vm::status::ElaraStatus;
 use crate::vm::upvalue::{ObjClosure, ObjUpvalue};
 
 const MODULE_INTRINSICS: [&str; 6] = ["math", "string", "table", "bit", "sys", "fiber"];
-const FN_INTRINSICS: [&str; 7] = [
-    "pcall", "panic", "type", "tostring", "tonumber", "print", "assert",
+const FN_INTRINSICS: [&str; 8] = [
+    "pcall",
+    "panic",
+    "type",
+    "tostring",
+    "tonumber",
+    "print",
+    "assert",
+    "__register_close",
 ];
 
 /// Compiles `source` into a root script `ObjProto` (with env upvalue 0 for globals).
