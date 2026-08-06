@@ -21,10 +21,25 @@ pub struct Parser<'a> {
     lookahead: Option<Token<'a>>,
     scopes: Vec<FunctionScope<'a>>,
     scratch: Vec<u8>,
+    /// When true, top-level `export` declarations are accepted.
+    is_module: bool,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(state: &mut ElaraState, source: &'a str, root: FunctionScope<'a>) -> Self {
+        Self::new_inner(state, source, root, false)
+    }
+
+    pub fn new_module(state: &mut ElaraState, source: &'a str, root: FunctionScope<'a>) -> Self {
+        Self::new_inner(state, source, root, true)
+    }
+
+    fn new_inner(
+        state: &mut ElaraState,
+        source: &'a str,
+        root: FunctionScope<'a>,
+        is_module: bool,
+    ) -> Self {
         let mut lexer = Lexer::new(source);
         let current = lexer.next_token();
         Self {
@@ -40,6 +55,7 @@ impl<'a> Parser<'a> {
             lookahead: None,
             scopes: vec![root],
             scratch: Vec::new(),
+            is_module,
         }
     }
 
@@ -67,7 +83,9 @@ impl<'a> Parser<'a> {
     }
 
     fn declaration(&mut self) -> Result<(), CompileError> {
-        if self.match_tok(TokenKind::KwLet) {
+        if self.is_module && self.match_tok(TokenKind::KwExport) {
+            self.parse_export()
+        } else if self.match_tok(TokenKind::KwLet) {
             self.parse_let(false)
         } else if self.match_tok(TokenKind::KwConst) {
             self.parse_let(true)
@@ -128,6 +146,127 @@ impl<'a> Parser<'a> {
 
     fn parse_let(&mut self, is_const: bool) -> Result<(), CompileError> {
         self.consume(TokenKind::Ident, "Expected variable name")?;
+        let mut names = vec![self.previous.lexeme];
+        let line = self.previous.line;
+        while self.match_tok(TokenKind::Comma) {
+            self.consume(TokenKind::Ident, "Expected variable name")?;
+            names.push(self.previous.lexeme);
+        }
+        self.consume(TokenKind::Assign, "Expected '=' after variable name")?;
+        if names.len() == 1 {
+            let init = self.parse_expression()?;
+            let (scope, state) = self.sa();
+            let reg = scope.declare_local(names[0], is_const, false, line)?;
+            scope.discharge_to_reg(&mut state.alloc, init, reg, line)?;
+            scope.mark_initialized();
+        } else {
+            self.parse_multi_let(&names, is_const, line)?;
+        }
+        let (scope, _) = self.sa();
+        scope.reset_regs();
+        let _ = self.match_tok(TokenKind::Semicolon);
+        Ok(())
+    }
+
+    /// `let a, b = call(...)` — expands call results into consecutive locals.
+    fn parse_multi_let(
+        &mut self,
+        names: &[&'a str],
+        is_const: bool,
+        line: u32,
+    ) -> Result<(), CompileError> {
+        let n = names.len();
+        if n > 15 {
+            return Err(CompileError::new("Too many variables in let", line));
+        }
+        let base = {
+            let (scope, _) = self.sa();
+            let mut first = 0u8;
+            for (i, name) in names.iter().enumerate() {
+                let reg = scope.declare_local(name, is_const, false, line)?;
+                if i == 0 {
+                    first = reg;
+                }
+            }
+            // Reclaim registers so the RHS call deposits results into the locals.
+            scope.free_reg = first;
+            first
+        };
+        let init = self.parse_expression()?;
+        let (scope, state) = self.sa();
+        match init.kind {
+            ExprKind::NonReloc { reg } if reg == base => unsafe {
+                let p = &mut *scope.proto;
+                if p.code_count > 0 {
+                    let last = &mut *p.code.add(p.code_count as usize - 1);
+                    if last.opcode_raw() == OpCode::Call as u8 && last.a() == base {
+                        *last = Instruction::make_abc(
+                            OpCode::Call,
+                            base,
+                            last.b(),
+                            (n as u8).saturating_add(1),
+                        );
+                    }
+                }
+            },
+            _ => {
+                scope.discharge_to_reg(&mut state.alloc, init, base, line)?;
+            }
+        }
+        let depth = scope.scope_depth as i16;
+        let start = scope.locals.len().saturating_sub(n);
+        for local in &mut scope.locals[start..] {
+            local.depth = depth;
+        }
+        scope.free_reg = base.saturating_add(n as u8);
+        Ok(())
+    }
+
+    fn parse_export(&mut self) -> Result<(), CompileError> {
+        let line = self.current.line;
+        if self.match_tok(TokenKind::KwLet) {
+            self.parse_export_binding(false)
+        } else if self.match_tok(TokenKind::KwConst) {
+            self.parse_export_binding(true)
+        } else if self.match_tok(TokenKind::KwFn) {
+            self.parse_export_fn()
+        } else if self.match_tok(TokenKind::Ident) {
+            let name = self.previous.lexeme;
+            let line = self.previous.line;
+            let value_reg = if self.match_tok(TokenKind::Assign) {
+                let init = self.parse_expression()?;
+                let (scope, state) = self.sa();
+                scope.expr_to_any_reg(&mut state.alloc, init, line)?
+            } else {
+                let kind = {
+                    let state = unsafe { &mut *self.state };
+                    resolve_variable(&mut state.alloc, &mut self.scopes, name, line)?
+                };
+                let (scope, state) = self.sa();
+                scope.expr_to_any_reg(&mut state.alloc, ExprDesc::new(kind), line)?
+            };
+            let (scope, state) = self.sa();
+            scope.emit_export(
+                &mut state.alloc,
+                &mut state.all_objects,
+                &mut state.strings,
+                name,
+                value_reg,
+                line,
+            )?;
+            scope.reset_regs();
+            let _ = self.match_tok(TokenKind::Semicolon);
+            Ok(())
+        } else {
+            Err(CompileError::new(
+                "Expected let, const, fn, or name after export",
+                line,
+            ))
+        }
+    }
+
+    fn parse_export_binding(&mut self, is_const: bool) -> Result<(), CompileError> {
+        self.consume(TokenKind::Ident, "Expected variable name")?;
         let name = self.previous.lexeme;
         let line = self.previous.line;
         self.consume(TokenKind::Assign, "Expected '=' after variable name")?;
@@ -136,6 +275,39 @@ impl<'a> Parser<'a> {
         let reg = scope.declare_local(name, is_const, false, line)?;
         scope.discharge_to_reg(&mut state.alloc, init, reg, line)?;
         scope.mark_initialized();
+        scope.emit_export(
+            &mut state.alloc,
+            &mut state.all_objects,
+            &mut state.strings,
+            name,
+            reg,
+            line,
+        )?;
+        scope.reset_regs();
+        let _ = self.match_tok(TokenKind::Semicolon);
+        Ok(())
+    }
+
+    fn parse_export_fn(&mut self) -> Result<(), CompileError> {
+        self.consume(TokenKind::Ident, "Expected function name")?;
+        let name = self.previous.lexeme;
+        let line = self.previous.line;
+        let dst = {
+            let (scope, _) = self.sa();
+            let reg = scope.declare_local(name, true, false, line)?;
+            scope.mark_initialized();
+            reg
+        };
+        self.compile_function_body(name, dst)?;
+        let (scope, state) = self.sa();
+        scope.emit_export(
+            &mut state.alloc,
+            &mut state.all_objects,
+            &mut state.strings,
+            name,
+            dst,
+            line,
+        )?;
         scope.reset_regs();
         let _ = self.match_tok(TokenKind::Semicolon);
         Ok(())

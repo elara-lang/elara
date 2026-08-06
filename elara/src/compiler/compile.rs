@@ -17,7 +17,7 @@ use crate::vm::state::ElaraState;
 use crate::vm::status::ElaraStatus;
 use crate::vm::upvalue::{ObjClosure, ObjUpvalue};
 
-const MODULE_INTRINSICS: [&str; 6] = ["math", "string", "table", "bit", "sys", "fiber"];
+const MODULE_INTRINSICS: [&str; 7] = ["math", "string", "table", "bit", "sys", "fiber", "gc"];
 const FN_INTRINSICS: [&str; 8] = [
     "pcall",
     "panic",
@@ -35,6 +35,51 @@ pub unsafe fn compile_script(
     chunk_name: &str,
     source: &str,
 ) -> Result<*mut ObjProto, CompileError> {
+    let proto = prepare_root_proto(state, chunk_name)?;
+    let dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 16)
+        .ok_or_else(|| CompileError::new("Out of memory", 1))?;
+
+    let mut scope = FunctionScope::new(proto, dedup.as_ptr());
+    emit_intrinsic_prologue(state, &mut scope)?;
+
+    let line = parser_end_line(source);
+    let mut parser = Parser::new(state, source, scope);
+    parser.parse_chunk()?;
+    let mut scope = parser.into_scope();
+    scope.emit(
+        &mut state.alloc,
+        Instruction::make_abc(OpCode::Return, 0, 1, 0),
+        line,
+    )?;
+    Ok(proto)
+}
+
+/// Compiles `source` as a module chunk (exports table in `R[0]`, env upvalue 0).
+pub unsafe fn compile_module(
+    state: &mut ElaraState,
+    chunk_name: &str,
+    source: &str,
+) -> Result<*mut ObjProto, CompileError> {
+    let proto = prepare_root_proto(state, chunk_name)?;
+    let dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 16)
+        .ok_or_else(|| CompileError::new("Out of memory", 1))?;
+
+    let mut scope = FunctionScope::new(proto, dedup.as_ptr());
+    scope.begin_module(&mut state.alloc, 1)?;
+    emit_intrinsic_prologue(state, &mut scope)?;
+
+    let line = parser_end_line(source);
+    let mut parser = Parser::new_module(state, source, scope);
+    parser.parse_chunk()?;
+    let mut scope = parser.into_scope();
+    scope.finish_module(&mut state.alloc, line)?;
+    Ok(proto)
+}
+
+unsafe fn prepare_root_proto(
+    state: &mut ElaraState,
+    chunk_name: &str,
+) -> Result<*mut ObjProto, CompileError> {
     let name = state
         .strings
         .new_string(
@@ -45,8 +90,6 @@ pub unsafe fn compile_script(
         )
         .ok_or_else(|| CompileError::new("Out of memory", 1))?;
     let proto = ObjProto::new(&mut state.alloc, &mut state.all_objects, 0, name.as_ptr())
-        .ok_or_else(|| CompileError::new("Out of memory", 1))?;
-    let dedup = ObjTable::new(&mut state.alloc, &mut state.all_objects, 0, 1, 0, 16)
         .ok_or_else(|| CompileError::new("Out of memory", 1))?;
 
     // Env upvalue filled by [`bind_env_upvalue`] at load/eval time.
@@ -61,19 +104,6 @@ pub unsafe fn compile_script(
             },
         )
         .map_err(|e| CompileError::new(e, 1))?;
-
-    let mut scope = FunctionScope::new(proto.as_ptr(), dedup.as_ptr());
-    emit_intrinsic_prologue(state, &mut scope)?;
-
-    let line = parser_end_line(source);
-    let mut parser = Parser::new(state, source, scope);
-    parser.parse_chunk()?;
-    let mut scope = parser.into_scope();
-    scope.emit(
-        &mut state.alloc,
-        Instruction::make_abc(OpCode::Return, 0, 1, 0),
-        line,
-    )?;
     Ok(proto.as_ptr())
 }
 

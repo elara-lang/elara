@@ -12,7 +12,9 @@ pub mod proto;
 pub mod scope;
 mod stmt;
 
-pub use compile::{bind_env_upvalue, closure_with_env, compile_script, set_compile_error};
+pub use compile::{
+    bind_env_upvalue, closure_with_env, compile_module, compile_script, set_compile_error,
+};
 pub use disasm::{disassemble_instruction, disassemble_proto};
 pub use expr::{BinOp, UnOp, encode_rk, encode_sc};
 pub use module::{ensure_string_constant, module_basename};

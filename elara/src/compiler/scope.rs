@@ -6,7 +6,7 @@ use crate::gc::GcAllocator;
 use crate::value::{ObjTable, Value};
 
 /// Pre-registered intrinsic bindings available in module scope without explicit declaration.
-pub const INTRINSIC_NAMES: [&str; 14] = [
+pub const INTRINSIC_NAMES: [&str; 15] = [
     "math",
     "string",
     "table",
@@ -20,6 +20,7 @@ pub const INTRINSIC_NAMES: [&str; 14] = [
     "print",
     "assert",
     "fiber",
+    "gc",
     "__register_close",
 ];
 
