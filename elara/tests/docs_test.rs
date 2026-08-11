@@ -66,10 +66,10 @@ fn assert_pair_matching_headings(en_name: &str, pt_name: &str) {
 
 #[test]
 fn docs_guides_and_pt_translations_exist_and_have_matching_headings() {
-    // architecture + c-ffi-guide (language-reference is added by a later docs task).
     const PAIRS: &[(&str, &str)] = &[
         ("architecture.md", "architecture-PT.md"),
         ("c-ffi-guide.md", "c-ffi-guide-PT.md"),
+        ("language-reference.md", "language-reference-PT.md"),
     ];
     for (en, pt) in PAIRS {
         assert_pair_matching_headings(en, pt);
