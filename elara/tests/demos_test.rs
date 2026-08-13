@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serializes tests that rebuild or execute artifacts under `bin/`.
+static BIN_ARTIFACTS_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -85,6 +89,7 @@ fn all_ela_demos_execute_identically_from_source_and_aot_elac_bytecode() {
 
 #[test]
 fn c_ffi_demo_compiles_and_passes_host_sandbox_assertions() {
+    let _guard = BIN_ARTIFACTS_LOCK.lock().expect("bin lock");
     let root = repo_root();
     let status = Command::new("make")
         .arg("build")
@@ -140,6 +145,7 @@ fn c_ffi_demo_compiles_and_passes_host_sandbox_assertions() {
 
 #[test]
 fn run_demos_script_succeeds_end_to_end() {
+    let _guard = BIN_ARTIFACTS_LOCK.lock().expect("bin lock");
     let root = repo_root();
     let script = root.join("demos/run_demos.sh");
     let run = Command::new("bash")
