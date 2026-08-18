@@ -12,7 +12,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [[bin]]
 name = "elara"
-path = "src/main.rs"
+path = "src/bin/elara.rs"
 
 [[bin]]
 name = "elarac"
