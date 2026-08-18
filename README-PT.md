@@ -71,6 +71,12 @@ make build
 ./bin/elara --sandbox --gas 100000 --mem-limit 1048576 script.ela
 ```
 
+### Executar a suíte de demonstrações ponta a ponta
+
+```bash
+./demos/run_demos.sh
+```
+
 ## Estrutura do Projeto
 
 ```

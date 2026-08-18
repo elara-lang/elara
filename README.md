@@ -71,6 +71,12 @@ make build
 ./bin/elara --sandbox --gas 100000 --mem-limit 1048576 script.ela
 ```
 
+### Run the end-to-end demo suite
+
+```bash
+./demos/run_demos.sh
+```
+
 ## Project Layout
 
 ```
