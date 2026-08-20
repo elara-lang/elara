@@ -4,21 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../elara" && pwd)"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/bin}"
-BINARY_NAME="${BINARY_NAME:-elara}"
 CARGO="${CARGO:-cargo}"
 
 mkdir -p "$BUILD_DIR"
-echo "Building $BINARY_NAME..."
+echo "Building elara (release)..."
 $CARGO build --release --manifest-path "$ROOT_DIR/Cargo.toml"
-install -m 755 "$ROOT_DIR/target/release/$BINARY_NAME" "$BUILD_DIR/$BINARY_NAME"
-if [ -f "$ROOT_DIR/target/release/elarac" ]; then
-    install -m 755 "$ROOT_DIR/target/release/elarac" "$BUILD_DIR/elarac"
-fi
-if [ -f "$ROOT_DIR/target/release/libelara.a" ]; then
-    install -m 644 "$ROOT_DIR/target/release/libelara.a" "$BUILD_DIR/libelara.a"
-fi
-if [ -f "$ROOT_DIR/target/release/libelara.so" ]; then
-    install -m 755 "$ROOT_DIR/target/release/libelara.so" "$BUILD_DIR/libelara.so"
-fi
-echo "Done: $BUILD_DIR/$BINARY_NAME"
 
+RELEASE_DIR="$ROOT_DIR/target/release"
+missing=0
+for artifact in elara elarac libelara.a libelara.so; do
+  if [ ! -e "$RELEASE_DIR/$artifact" ]; then
+    echo "error: expected release artifact missing: $RELEASE_DIR/$artifact" >&2
+    missing=1
+  fi
+done
+if [ "$missing" -ne 0 ]; then
+  exit 1
+fi
+
+install -m 755 "$RELEASE_DIR/elara" "$BUILD_DIR/elara"
+install -m 755 "$RELEASE_DIR/elarac" "$BUILD_DIR/elarac"
+install -m 644 "$RELEASE_DIR/libelara.a" "$BUILD_DIR/libelara.a"
+install -m 755 "$RELEASE_DIR/libelara.so" "$BUILD_DIR/libelara.so"
+
+echo "Done:"
+echo "  $BUILD_DIR/elara"
+echo "  $BUILD_DIR/elarac"
+echo "  $BUILD_DIR/libelara.a"
+echo "  $BUILD_DIR/libelara.so"

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BINARY_NAME="${BINARY_NAME:-elara}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$REPO_ROOT/bin/$BINARY_NAME"
+BIN_DIR="${BUILD_DIR:-$REPO_ROOT/bin}"
 
 # Prefer the invoking user's home when running under sudo.
 user_home() {
@@ -23,31 +22,37 @@ else
   INSTALL_DIR="$(user_home)/.local/bin"
 fi
 
-if [ ! -x "$SRC" ]; then
-  echo "error: missing binary: $SRC" >&2
-  echo "hint:  run make build first" >&2
-  exit 1
-fi
+for name in elara elarac; do
+  if [ ! -x "$BIN_DIR/$name" ]; then
+    echo "error: missing binary: $BIN_DIR/$name" >&2
+    echo "hint:  run make build first" >&2
+    exit 1
+  fi
+done
 
-DEST="$INSTALL_DIR/$BINARY_NAME"
 UH="$(user_home)"
 
-# Under sudo: install into the user's home as that user so paths/ownership stay correct.
-if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-  case "$INSTALL_DIR" in
-    "$UH" | "$UH"/*)
-      sudo -u "$SUDO_USER" install -D -m 755 "$SRC" "$DEST"
-      ;;
-    *)
-      install -D -m 755 "$SRC" "$DEST"
-      ;;
-  esac
-elif [ -w "$(dirname "$INSTALL_DIR")" ] 2>/dev/null || [ -w "$INSTALL_DIR" ] 2>/dev/null; then
-  install -D -m 755 "$SRC" "$DEST"
-else
-  echo "Destination not writable; using sudo for install only..."
-  sudo install -D -m 755 "$SRC" "$DEST"
-fi
+install_one() {
+  local src="$1"
+  local dest="$2"
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    case "$INSTALL_DIR" in
+      "$UH" | "$UH"/*)
+        sudo -u "$SUDO_USER" install -D -m 755 "$src" "$dest"
+        ;;
+      *)
+        install -D -m 755 "$src" "$dest"
+        ;;
+    esac
+  elif [ -w "$(dirname "$INSTALL_DIR")" ] 2>/dev/null || [ -w "$INSTALL_DIR" ] 2>/dev/null; then
+    install -D -m 755 "$src" "$dest"
+  else
+    echo "Destination not writable; using sudo for install only..."
+    sudo install -D -m 755 "$src" "$dest"
+  fi
+  echo "Installed: $dest"
+}
 
-echo "Installed: $DEST"
-
+for name in elara elarac; do
+  install_one "$BIN_DIR/$name" "$INSTALL_DIR/$name"
+done

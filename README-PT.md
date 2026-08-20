@@ -32,13 +32,17 @@ cd elara
 make build
 ```
 
-Instale em `~/.local/bin` (padrão) ou globalmente no sistema em `/usr/local/bin` (sudo apenas para a cópia):
+Instale os binários em `~/.local/bin` (padrão) ou globalmente em `/usr/local/bin` (sudo apenas para a cópia). Instale as bibliotecas e o cabeçalho C separadamente em `~/.local/lib` + `~/.local/include` (ou `/usr/local/lib` + `/usr/local/include`):
 
 ```bash
 make install
 make install-system
+make install-libs
+make install-libs-system
 make uninstall
 make uninstall-system
+make uninstall-libs
+make uninstall-libs-system
 ```
 
 ## Início Rápido
@@ -91,13 +95,17 @@ bin/                 # Binários e bibliotecas compilados (elara, elarac, libela
 ## Desenvolvimento
 
 ```bash
-make build             # Compila em modo release e copia o binário para bin/elara
-make test              # Executa cargo test
-make quality           # Formata, executa clippy e roda os testes
-make install           # Instala o binário em ~/.local/bin
-make install-system    # Instala o binário em /usr/local/bin
-make uninstall         # Remove de ~/.local/bin
-make uninstall-system  # Remove de /usr/local/bin
+make build                  # Compila em release; copia elara, elarac, libelara.a, libelara.so para bin/
+make test                   # Executa cargo test
+make quality                # Formata, executa clippy e roda os testes
+make install                # Instala elara e elarac em ~/.local/bin
+make install-system         # Instala elara e elarac em /usr/local/bin
+make install-libs           # Instala libelara.a, libelara.so e elara.h em ~/.local
+make install-libs-system    # Instala bibliotecas e cabeçalho em /usr/local
+make uninstall              # Remove binários de ~/.local/bin
+make uninstall-system       # Remove binários de /usr/local/bin
+make uninstall-libs         # Remove bibliotecas e cabeçalho de ~/.local
+make uninstall-libs-system  # Remove bibliotecas e cabeçalho de /usr/local
 ```
 
 ## Licença
