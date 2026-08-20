@@ -69,6 +69,10 @@ pub struct ElaraState {
     pub cli_args: Vec<String>,
     /// Directories searched for `import` filesystem modules (script dir, cwd, …).
     pub module_search_dirs: Vec<String>,
+    /// Directory of the entry chunk. Relative imports from a byte-loaded module use it.
+    pub module_anchor: Option<String>,
+    /// Nested module load frames. The entry chunk uses [`Self::module_anchor`] when this is empty.
+    pub module_load_stack: Vec<crate::vm::library::LoadFrame>,
     /// Scratch buffer for the most recent filesystem / host module load.
     pub module_load_buf: Vec<u8>,
 }

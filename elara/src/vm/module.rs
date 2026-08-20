@@ -11,13 +11,9 @@ use crate::ffi::sandbox::{has_capability, module_required_cap};
 use crate::value::nan::{ObjType, Value};
 use crate::value::string::ObjString;
 use crate::value::table::ObjTable;
-use crate::vm::closure::ObjClosure;
-use crate::vm::dispatch::execute;
-use crate::vm::fiber::ObjFiber;
-use crate::vm::frame::CallFrame;
+use crate::vm::library::{self, LoadFrame, SpecFail};
 use crate::vm::state::ElaraState;
 use crate::vm::status::ElaraStatus;
-use crate::vm::verify::deserialize_elac;
 
 /// Light-userdata sentinel written into `modules_table` while a module is loading.
 pub const MODULE_LOADING_SENTINEL: Value = Value(0x7FFF_0000_0000_0001);
@@ -82,21 +78,29 @@ pub unsafe fn op_import(
     a: u8,
     bx: u16,
 ) -> Result<(), ElaraStatus> {
-    let spec_val = *k.add(bx as usize);
-    if !spec_val.is_obj_type(ObjType::String) {
+    let raw_val = *k.add(bx as usize);
+    if !raw_val.is_obj_type(ObjType::String) {
         set_module_error(state, format_args!("Module specifier must be a string"));
         return Err(ElaraStatus::ErrModule);
     }
-    let spec = (*spec_val.as_obj().cast::<ObjString>()).as_str();
+    let raw = (*raw_val.as_obj().cast::<ObjString>()).as_str();
+    let frame = library::active_frame(state.module_anchor.as_deref(), &state.module_load_stack);
+    let logical = match library::classify(raw, frame.as_ref()) {
+        Ok(spec) => spec,
+        Err(fail) => {
+            set_spec_fail(state, raw, fail);
+            return Err(ElaraStatus::ErrModule);
+        }
+    };
     let table = ensure_modules_table(state)?;
+    let key_val = intern_spec(state, &logical.key)?;
 
-    // 1. Cache lookup
-    let cached = (*table).get(spec_val);
+    let cached = (*table).get(key_val);
     if !cached.is_nil() {
         if cached.0 == MODULE_LOADING_SENTINEL.0 {
             set_module_error(
                 state,
-                format_args!("Circular module dependency detected: '{spec}'"),
+                format_args!("Circular module dependency detected: '{}'", logical.key),
             );
             return Err(ElaraStatus::ErrModule);
         }
@@ -106,50 +110,19 @@ pub unsafe fn op_import(
         }
     }
 
-    // 2. Intrinsic registry (stdlib modules).
-    if matches!(
-        spec,
-        "math" | "string" | "table" | "bit" | "sys" | "fiber" | "gc"
-    ) {
-        if let Some(cap) = module_required_cap(spec)
-            && !has_capability(state, cap)
-        {
-            set_module_error(
-                state,
-                format_args!("Module '{spec}' is disabled by sandbox capabilities"),
-            );
-            return Err(ElaraStatus::ErrModule);
-        }
-        let ev = match crate::stdlib::intrinsic_module(state, spec)? {
-            Some(v) => v,
-            None => {
-                set_module_error(state, format_args!("Module not found: '{spec}'"));
-                return Err(ElaraStatus::ErrModule);
-            }
-        };
-        (*table)
-            .set(&mut state.alloc, spec_val, ev)
-            .map_err(|_| ElaraStatus::ErrOom)?;
-        *base.add(a as usize) = ev;
-        return Ok(());
-    }
-
-    // Path-traversal rejection (filesystem / host paths).
-    if spec.split('/').any(|seg| seg == "..") {
-        set_module_error(state, format_args!("Module path traversal rejected"));
-        return Err(ElaraStatus::ErrModule);
+    if is_intrinsic(&logical.key) {
+        return load_intrinsic(state, table, key_val, base, a, &logical.key);
     }
 
     (*table)
-        .set(&mut state.alloc, spec_val, MODULE_LOADING_SENTINEL)
+        .set(&mut state.alloc, key_val, MODULE_LOADING_SENTINEL)
         .map_err(|_| ElaraStatus::ErrOom)?;
 
-    // 3. Host custom loader
     if let Some(loader) = state.module_loader {
-        let c_spec = match CString::new(spec) {
+        let c_spec = match CString::new(logical.key.clone()) {
             Ok(s) => s,
             Err(_) => {
-                remove_cache_entry(state, table, spec_val);
+                remove_cache_entry(state, table, key_val);
                 set_module_error(state, format_args!("Invalid module specifier"));
                 return Err(ElaraStatus::ErrModule);
             }
@@ -170,46 +143,145 @@ pub unsafe fn op_import(
         if st == ElaraStatus::Ok && !out_bytes.is_null() && out_len > 0 {
             let bytes = core::slice::from_raw_parts(out_bytes, out_len);
             let result = if out_is_bc {
-                load_and_run_bytecode(state, bytes)
+                let frame = byte_frame(state, &logical.key);
+                state.module_load_stack.push(frame);
+                let result = crate::vm::module_run::load_and_run_bytecode(state, bytes);
+                state.module_load_stack.pop();
+                result
             } else {
                 let src = match core::str::from_utf8(bytes) {
-                    Ok(s) => s,
+                    Ok(s) => s.to_owned(),
                     Err(_) => {
-                        remove_cache_entry(state, table, spec_val);
+                        remove_cache_entry(state, table, key_val);
                         set_module_error(state, format_args!("Module source is not valid UTF-8"));
                         return Err(ElaraStatus::ErrModule);
                     }
                 };
-                compile_and_run_module_source(state, spec, src)
+                let frame = byte_frame(state, &logical.key);
+                state.module_load_stack.push(frame);
+                let result =
+                    crate::vm::module_run::compile_and_run_module_source(state, &logical.key, &src);
+                state.module_load_stack.pop();
+                result
             };
-            return finish_module_load(state, table, spec_val, base, a, result);
+            return finish_module_load(state, table, key_val, base, a, result);
         }
     }
 
-    // 4. Filesystem search when SYS_ENV (or full) capabilities allow it.
     if has_capability(state, crate::ffi::sandbox::ELARA_CAP_SYS_ENV)
-        && let Some((is_bc, owned)) = read_module_from_filesystem(state, spec)
+        && let Some(found) = library::find_module(
+            &state.module_search_dirs,
+            &logical.key,
+            logical.only_root.as_deref(),
+        )
     {
-        let result = if is_bc {
-            load_and_run_bytecode(state, &owned)
+        let frame = LoadFrame {
+            search_root: Some(found.search_root),
+            rel_dir: found.rel_dir,
+        };
+        let result = if found.is_bytecode {
+            state.module_load_stack.push(frame);
+            let result = crate::vm::module_run::load_and_run_bytecode(state, &found.bytes);
+            state.module_load_stack.pop();
+            result
         } else {
-            let src_owned = match core::str::from_utf8(&owned) {
+            let src_owned = match core::str::from_utf8(&found.bytes) {
                 Ok(s) => s.to_owned(),
                 Err(_) => {
-                    remove_cache_entry(state, table, spec_val);
+                    remove_cache_entry(state, table, key_val);
                     set_module_error(state, format_args!("Module source is not valid UTF-8"));
                     return Err(ElaraStatus::ErrModule);
                 }
             };
-            compile_and_run_module_source(state, spec, &src_owned)
+            state.module_load_stack.push(frame);
+            let result = crate::vm::module_run::compile_and_run_module_source(
+                state,
+                &logical.key,
+                &src_owned,
+            );
+            state.module_load_stack.pop();
+            result
         };
-        state.module_load_buf = owned;
-        return finish_module_load(state, table, spec_val, base, a, result);
+        state.module_load_buf = found.bytes;
+        return finish_module_load(state, table, key_val, base, a, result);
     }
 
-    remove_cache_entry(state, table, spec_val);
-    set_module_error(state, format_args!("Module not found: '{spec}'"));
+    remove_cache_entry(state, table, key_val);
+    set_module_error(state, format_args!("Module not found: '{}'", logical.key));
     Err(ElaraStatus::ErrModule)
+}
+
+fn is_intrinsic(key: &str) -> bool {
+    matches!(
+        key,
+        "math" | "string" | "table" | "bit" | "sys" | "fiber" | "gc"
+    )
+}
+
+fn set_spec_fail(state: &mut ElaraState, raw: &str, fail: SpecFail) {
+    match fail {
+        SpecFail::Absolute => {
+            set_module_error(state, format_args!("Module path is absolute: '{raw}'"));
+        }
+        SpecFail::Invalid => {
+            set_module_error(state, format_args!("Invalid module specifier"));
+        }
+        SpecFail::NeedsAnchor => {
+            set_module_error(
+                state,
+                format_args!("Relative import requires a file anchor"),
+            );
+        }
+        SpecFail::Traversal => {
+            set_module_error(state, format_args!("Module path traversal rejected"));
+        }
+    }
+}
+
+unsafe fn intern_spec(state: &mut ElaraState, key: &str) -> Result<Value, ElaraStatus> {
+    let s = state
+        .strings
+        .new_string(&mut state.alloc, &mut state.all_objects, 0, key.as_bytes())
+        .ok_or(ElaraStatus::ErrOom)?;
+    Ok(Value::from_obj(s.cast(), ObjType::String))
+}
+
+unsafe fn load_intrinsic(
+    state: &mut ElaraState,
+    table: *mut ObjTable,
+    key_val: Value,
+    base: *mut Value,
+    a: u8,
+    key: &str,
+) -> Result<(), ElaraStatus> {
+    if let Some(cap) = module_required_cap(key)
+        && !has_capability(state, cap)
+    {
+        set_module_error(
+            state,
+            format_args!("Module '{key}' is disabled by sandbox capabilities"),
+        );
+        return Err(ElaraStatus::ErrModule);
+    }
+    let ev = match crate::stdlib::intrinsic_module(state, key)? {
+        Some(v) => v,
+        None => {
+            set_module_error(state, format_args!("Module not found: '{key}'"));
+            return Err(ElaraStatus::ErrModule);
+        }
+    };
+    (*table)
+        .set(&mut state.alloc, key_val, ev)
+        .map_err(|_| ElaraStatus::ErrOom)?;
+    *base.add(a as usize) = ev;
+    Ok(())
+}
+
+fn byte_frame(state: &ElaraState, logical: &str) -> LoadFrame {
+    LoadFrame {
+        search_root: state.module_anchor.clone(),
+        rel_dir: library::parent_key(logical),
+    }
 }
 
 unsafe fn finish_module_load(
@@ -236,118 +308,6 @@ unsafe fn finish_module_load(
     }
 }
 
-fn read_module_from_filesystem(state: &ElaraState, spec: &str) -> Option<(bool, Vec<u8>)> {
-    let mut dirs: Vec<String> = state.module_search_dirs.clone();
-    if dirs.is_empty() {
-        dirs.push(".".to_string());
-    }
-    let candidates = [
-        format!("{spec}.elac"),
-        format!("{spec}.ela"),
-        spec.to_string(),
-    ];
-    for dir in &dirs {
-        for name in &candidates {
-            let path = if dir == "." {
-                name.clone()
-            } else {
-                format!("{dir}/{name}")
-            };
-            if let Ok(data) = std::fs::read(&path) {
-                let is_bc = data.len() >= 6 && data[0] == 0x1B && &data[1..6] == b"ELARA";
-                return Some((is_bc, data));
-            }
-        }
-    }
-    None
-}
-
-unsafe fn compile_and_run_module_source(
-    state: &mut ElaraState,
-    chunk_name: &str,
-    source: &str,
-) -> Result<Value, ElaraStatus> {
-    let proto = match crate::compiler::compile_module(state, chunk_name, source) {
-        Ok(p) => p,
-        Err(e) => {
-            crate::compiler::set_compile_error(state, &e);
-            return Err(ElaraStatus::ErrSyntax);
-        }
-    };
-    if let Err(msg) = crate::vm::verify_proto(&*proto, None) {
-        state.last_error = Some(msg);
-        return Err(ElaraStatus::ErrVerify);
-    }
-    run_module_proto(state, proto)
-}
-
 unsafe fn remove_cache_entry(state: &mut ElaraState, table: *mut ObjTable, key: Value) {
     let _ = (*table).set(&mut state.alloc, key, Value::NIL);
-}
-
-unsafe fn load_and_run_bytecode(
-    state: &mut ElaraState,
-    bytes: &[u8],
-) -> Result<Value, ElaraStatus> {
-    let proto = deserialize_elac(state, bytes)?;
-    run_module_proto(state, proto)
-}
-
-unsafe fn run_module_proto(
-    state: &mut ElaraState,
-    proto: *mut crate::compiler::ObjProto,
-) -> Result<Value, ElaraStatus> {
-    let closure = ObjClosure::new(&mut state.alloc, &mut state.all_objects, 0, proto)
-        .ok_or(ElaraStatus::ErrOom)?;
-    crate::compiler::bind_env_upvalue(state, closure.as_ptr())?;
-    let stack_slots = (1 + (*proto).max_stack_size as u32).max(16);
-    let mut fiber = ObjFiber::new(&mut state.alloc, &mut state.all_objects, 0, stack_slots, 8)
-        .ok_or(ElaraStatus::ErrOom)?;
-    let f = fiber.as_mut();
-    let cv = Value::from_obj(
-        core::ptr::NonNull::new(closure.as_ptr().cast()).unwrap(),
-        ObjType::Closure,
-    );
-    *f.stack = cv;
-    f.open_top = 1;
-    f.push_frame(&mut state.alloc, CallFrame::new(closure.as_ptr(), 1, 0, 1))?;
-
-    let saved = state.current_fiber;
-    state.current_fiber = fiber.as_ptr();
-    let st = execute(state, fiber.as_ptr());
-    state.current_fiber = saved;
-
-    let out = if st == ElaraStatus::Ok {
-        let v = *f.stack;
-        if !v.is_obj_type(ObjType::Table) {
-            set_module_error(
-                state,
-                format_args!("Module did not return an exports table"),
-            );
-            Err(ElaraStatus::ErrModule)
-        } else {
-            Ok(v)
-        }
-    } else {
-        Err(st)
-    };
-
-    let fiber_ptr = fiber.as_ptr();
-    unlink_object(&mut state.all_objects, fiber_ptr.cast());
-    (*fiber_ptr).free_fiber(&mut state.alloc);
-    out
-}
-
-unsafe fn unlink_object(
-    head: &mut *mut crate::value::GcHeader,
-    target: *mut crate::value::GcHeader,
-) {
-    let mut cursor = head;
-    while !(*cursor).is_null() {
-        if *cursor == target {
-            *cursor = (*target).next;
-            return;
-        }
-        cursor = &mut (*(*cursor)).next;
-    }
 }

@@ -641,6 +641,37 @@ pub unsafe extern "C" fn elara_set_module_loader(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_add_module_search_dir(
+    state: *mut ElaraState,
+    dir: *const c_char,
+) -> ElaraStatus {
+    if state.is_null() || dir.is_null() {
+        return ElaraStatus::ErrModule;
+    }
+    let text = match core::ffi::CStr::from_ptr(dir).to_str() {
+        Ok(t) if !t.is_empty() => t,
+        _ => return ElaraStatus::ErrModule,
+    };
+    (*state).module_search_dirs.push(text.to_string());
+    ElaraStatus::Ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_set_module_anchor(state: *mut ElaraState, dir: *const c_char) {
+    if state.is_null() {
+        return;
+    }
+    if dir.is_null() {
+        (*state).module_anchor = None;
+        return;
+    }
+    match core::ffi::CStr::from_ptr(dir).to_str() {
+        Ok(t) if !t.is_empty() => (*state).module_anchor = Some(t.to_string()),
+        _ => (*state).module_anchor = None,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_set_global(state: *mut ElaraState, name: *const c_char, val: u64) {
     if state.is_null() || name.is_null() {
         return;
