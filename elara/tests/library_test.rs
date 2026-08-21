@@ -170,3 +170,132 @@ fn intrinsic_math_shadows_math_ela_on_the_search_path() {
     assert_eq!(val.to_i64(), Some(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn library_search_path_order_is_script_then_lib_flag_then_local_ini_then_env_then_system_ini() {
+    let root = temp_dir("iniord");
+    let proj = root.join("proj");
+    let dot = root.join("dot");
+    let lib = root.join("lib");
+    let local = root.join("proj").join("libs");
+    let env = root.join("env");
+    let sys = root.join("sys");
+    for dir in [&proj, &dot, &lib, &local, &env, &sys] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(proj.join("shadow.ela"), "export const id = \"script\"\n").unwrap();
+    std::fs::write(dot.join("from_dot.ela"), "export const id = \"dot\"\n").unwrap();
+    std::fs::write(lib.join("from_lib.ela"), "export const id = \"lib\"\n").unwrap();
+    std::fs::write(local.join("from_lib.ela"), "export const id = \"local\"\n").unwrap();
+    std::fs::write(
+        local.join("from_local.ela"),
+        "export const id = \"local\"\n",
+    )
+    .unwrap();
+    std::fs::write(env.join("from_local.ela"), "export const id = \"env\"\n").unwrap();
+    std::fs::write(env.join("from_env.ela"), "export const id = \"env\"\n").unwrap();
+    std::fs::write(sys.join("from_env.ela"), "export const id = \"sys\"\n").unwrap();
+    std::fs::write(sys.join("from_sys.ela"), "export const id = \"sys\"\n").unwrap();
+    std::fs::write(proj.join("elara.ini"), "lib_path = libs\n").unwrap();
+    let sys_ini = root.join("system.ini");
+    std::fs::write(&sys_ini, format!("lib_path = {}\n", sys.display())).unwrap();
+    let main = proj.join("main.ela");
+    std::fs::write(
+        &main,
+        "import \"shadow\" as s\n\
+         import \"from_dot\" as d\n\
+         import \"from_lib\" as l\n\
+         import \"from_local\" as c\n\
+         import \"from_env\" as e\n\
+         import \"from_sys\" as y\n\
+         print(s.id)\n\
+         print(d.id)\n\
+         print(l.id)\n\
+         print(c.id)\n\
+         print(e.id)\n\
+         print(y.id)\n",
+    )
+    .unwrap();
+
+    let elara = env!("CARGO_BIN_EXE_elara");
+    let out = Command::new(elara)
+        .current_dir(&dot)
+        .env("ELARA_PATH", env.as_os_str())
+        .env("ELARA_SYS_INI", sys_ini.as_os_str())
+        .args(["--lib", lib.to_str().unwrap(), main.to_str().unwrap()])
+        .output()
+        .expect("run elara");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "script\ndot\nlib\nlocal\nenv\nsys\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn library_relative_lib_path_resolves_against_the_ini_directory() {
+    let root = temp_dir("inirel");
+    let proj = root.join("proj");
+    let dot = root.join("dot");
+    std::fs::create_dir_all(proj.join("libs")).unwrap();
+    std::fs::create_dir_all(dot.join("libs")).unwrap();
+    std::fs::write(proj.join("elara.ini"), "lib_path = libs\n").unwrap();
+    std::fs::write(
+        proj.join("libs/leaf.ela"),
+        "export const id = \"from-ini\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dot.join("libs/leaf.ela"),
+        "export const id = \"from-cwd\"\n",
+    )
+    .unwrap();
+    let main = proj.join("main.ela");
+    std::fs::write(&main, "import \"leaf\" as m\nprint(m.id)\n").unwrap();
+
+    let elara = env!("CARGO_BIN_EXE_elara");
+    let out = Command::new(elara)
+        .current_dir(&dot)
+        .env("ELARA_SYS_INI", "")
+        .env_remove("ELARA_PATH")
+        .arg(main.as_os_str())
+        .output()
+        .expect("run elara");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from-ini\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn library_ini_syntax_error_stops_the_cli_before_the_script() {
+    let root = temp_dir("inibad");
+    std::fs::write(root.join("elara.ini"), "not_a_directive\n").unwrap();
+    let main = root.join("main.ela");
+    std::fs::write(&main, "print(1)\n").unwrap();
+    let elara = env!("CARGO_BIN_EXE_elara");
+    let out = Command::new(elara)
+        .current_dir(&root)
+        .env("ELARA_SYS_INI", "")
+        .env_remove("ELARA_PATH")
+        .arg(main.as_os_str())
+        .output()
+        .expect("run elara");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    let ini = root.join("elara.ini");
+    assert!(
+        err.contains(&format!("{}:1:", ini.display())),
+        "stderr={err}"
+    );
+    assert!(out.stdout.is_empty(), "script ran despite a bad ini");
+    let _ = std::fs::remove_dir_all(&root);
+}

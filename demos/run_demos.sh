@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 unset ELARA_PATH
+export ELARA_SYS_INI=
 
 if [[ ! -x bin/elara || ! -x bin/elarac || ! -f bin/libelara.a ]]; then
   make build
