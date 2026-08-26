@@ -28,6 +28,7 @@ fn main() -> ExitCode {
     let mut mem_limit: Option<usize> = None;
     let mut sandbox = false;
     let mut disasm = false;
+    let mut lib_dirs: Vec<String> = Vec::new();
     let mut eval_code: Option<String> = None;
     let mut file: Option<String> = None;
     let mut script_args: Vec<String> = Vec::new();
@@ -73,6 +74,14 @@ fn main() -> ExitCode {
             }
             "--sandbox" => sandbox = true,
             "--disasm" => disasm = true,
+            "--lib" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("elara: --lib requires a directory");
+                    return ExitCode::from(2);
+                }
+                lib_dirs.push(args[i].clone());
+            }
             other if other.starts_with('-') => {
                 eprintln!("elara: unknown option {other}");
                 return ExitCode::from(2);
@@ -104,21 +113,29 @@ fn main() -> ExitCode {
         eprintln!("elara: failed to open state");
         return ExitCode::from(1);
     }
+    let anchor = if eval_code.is_some() {
+        ".".to_string()
+    } else if let Some(ref path) = file {
+        script_anchor(path)
+    } else {
+        ".".to_string()
+    };
+    let mut dirs = vec![anchor.clone()];
+    if anchor != "." {
+        dirs.push(".".to_string());
+    }
+    dirs.extend(lib_dirs);
+    if let Ok(path) = env::var("ELARA_PATH") {
+        for part in path.split(':') {
+            if !part.is_empty() {
+                dirs.push(part.to_string());
+            }
+        }
+    }
     unsafe {
         (*state).cli_args = script_args;
-        if let Some(ref path) = file {
-            let mut dirs = Vec::new();
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                let p = parent.to_string_lossy();
-                if !p.is_empty() {
-                    dirs.push(p.into_owned());
-                }
-            }
-            dirs.push(".".to_string());
-            (*state).module_search_dirs = dirs;
-        } else {
-            (*state).module_search_dirs = vec![".".to_string()];
-        }
+        (*state).module_anchor = Some(anchor);
+        (*state).module_search_dirs = dirs;
     }
 
     let status = if let Some(code) = eval_code {
@@ -147,6 +164,20 @@ fn main() -> ExitCode {
     };
     unsafe { elara_close(state) };
     exit
+}
+
+fn script_anchor(path: &str) -> String {
+    match std::path::Path::new(path).parent() {
+        Some(parent) => {
+            let text = parent.to_string_lossy();
+            if text.is_empty() {
+                ".".to_string()
+            } else {
+                text.into_owned()
+            }
+        }
+        None => ".".to_string(),
+    }
 }
 
 unsafe fn error_msg(state: *mut elara::vm::ElaraState) -> String {
@@ -290,6 +321,7 @@ fn print_help() {
            --gas <N>          Instruction gas limit\n\
            --mem-limit <N>    Heap memory limit in bytes\n\
            --sandbox          Restrict capabilities (safe default + stdio)\n\
+           --lib <dir>        Add a library search directory\n\
            --disasm           Disassemble bytecode before running\n\
            -v, --version      Print version\n\
            -h, --help         Show this help"

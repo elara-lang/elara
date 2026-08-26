@@ -130,7 +130,9 @@ typedef elara_Status (*elara_ModuleLoaderFn)(
     void*        ud
 );
 
-void        elara_set_module_loader(elara_State* S, elara_ModuleLoaderFn loader, void* ud);
+void         elara_set_module_loader(elara_State* S, elara_ModuleLoaderFn loader, void* ud);
+elara_Status elara_add_module_search_dir(elara_State* S, const char* dir);
+void         elara_set_module_anchor(elara_State* S, const char* dir);
 void        elara_set_global(elara_State* S, const char* name, elara_Value val);
 elara_Value elara_get_global(elara_State* S, const char* name);
 const char* elara_last_error(const elara_State* S);

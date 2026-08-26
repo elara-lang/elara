@@ -155,6 +155,8 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
         exit_code: None,
         cli_args: Vec::new(),
         module_search_dirs: Vec::new(),
+        module_anchor: None,
+        module_load_stack: Vec::new(),
         module_load_buf: Vec::new(),
     }
 }
