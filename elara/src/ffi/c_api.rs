@@ -657,6 +657,74 @@ pub unsafe extern "C" fn elara_add_module_search_dir(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_register_native_module(
+    state: *mut ElaraState,
+    name: *const c_char,
+    open: Option<crate::vm::native_lib::ElaraNativeModuleOpenFn>,
+    ud: *mut c_void,
+) {
+    if state.is_null() || name.is_null() {
+        return;
+    }
+    let Some(open) = open else {
+        return;
+    };
+    let Ok(text) = core::ffi::CStr::from_ptr(name).to_str() else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    crate::vm::native_lib::register(&mut *state, text, open, ud);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_new_table(state: *mut ElaraState) -> u64 {
+    if state.is_null() {
+        return Value::NIL.0;
+    }
+    let s = &mut *state;
+    match crate::value::ObjTable::new(&mut s.alloc, &mut s.all_objects, 0, 1, 0, 0) {
+        Some(p) => Value::from_obj(p.cast(), ObjType::Table).0,
+        None => Value::NIL.0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn elara_table_set(
+    state: *mut ElaraState,
+    table: u64,
+    key: *const c_char,
+    val: u64,
+) -> ElaraStatus {
+    if state.is_null() || key.is_null() {
+        return ElaraStatus::ErrRuntime;
+    }
+    let recv = Value(table);
+    if !recv.is_obj_type(ObjType::Table) {
+        return ElaraStatus::ErrRuntime;
+    }
+    let s = &mut *state;
+    let bytes = core::ffi::CStr::from_ptr(key).to_bytes();
+    let key_val = match s
+        .strings
+        .new_string(&mut s.alloc, &mut s.all_objects, 0, bytes)
+    {
+        Some(p) => Value::from_obj(p.cast(), ObjType::String),
+        None => return ElaraStatus::ErrOom,
+    };
+    let table_ptr = recv.as_obj().cast::<crate::value::ObjTable>();
+    match (*table_ptr).set(&mut s.alloc, key_val, Value(val)) {
+        Ok(()) => {
+            crate::gc::barrier::barrier_table_write(s, table_ptr, key_val, Value(val));
+            ElaraStatus::Ok
+        }
+        Err("Out of memory") => ElaraStatus::ErrOom,
+        Err(_) => ElaraStatus::ErrRuntime,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn elara_set_module_anchor(state: *mut ElaraState, dir: *const c_char) {
     if state.is_null() {
         return;

@@ -158,6 +158,8 @@ pub fn state_from_config(cfg: Option<&ElaraConfig>) -> ElaraState {
         module_anchor: None,
         module_load_stack: Vec::new(),
         module_load_buf: Vec::new(),
+        native_modules: Vec::new(),
+        native_libs: Vec::new(),
     }
 }
 
@@ -211,5 +213,6 @@ pub unsafe fn destroy_state(state: *mut ElaraState) {
         crate::gc::sweep::free_object(&mut s, obj);
     }
     s.strings.free_all(&mut s.alloc);
+    crate::vm::native_lib::close_shared_libraries(&mut s);
     let _ = core::mem::size_of::<ObjUpvalue>();
 }

@@ -118,6 +118,10 @@ pub unsafe fn op_import(
         .set(&mut state.alloc, key_val, MODULE_LOADING_SENTINEL)
         .map_err(|_| ElaraStatus::ErrOom)?;
 
+    if let Some(result) = crate::vm::native_lib::open_registered(state, &logical.key) {
+        return finish_module_load(state, table, key_val, base, a, result);
+    }
+
     if let Some(loader) = state.module_loader {
         let c_spec = match CString::new(logical.key.clone()) {
             Ok(s) => s,
@@ -168,17 +172,27 @@ pub unsafe fn op_import(
         }
     }
 
-    if has_capability(state, crate::ffi::sandbox::ELARA_CAP_SYS_ENV)
+    let read_files = has_capability(state, crate::ffi::sandbox::ELARA_CAP_SYS_ENV);
+    let read_native = has_capability(state, crate::ffi::sandbox::ELARA_CAP_NATIVE);
+    if (read_files || read_native)
         && let Some(found) = library::find_module(
             &state.module_search_dirs,
             &logical.key,
             logical.only_root.as_deref(),
+            read_files,
+            read_native,
         )
     {
         let frame = LoadFrame {
-            search_root: Some(found.search_root),
-            rel_dir: found.rel_dir,
+            search_root: Some(found.search_root.clone()),
+            rel_dir: found.rel_dir.clone(),
         };
+        if found.is_native {
+            state.module_load_stack.push(frame);
+            let result = crate::vm::native_lib::open_shared(state, &found.path, &logical.key);
+            state.module_load_stack.pop();
+            return finish_module_load(state, table, key_val, base, a, result);
+        }
         let result = if found.is_bytecode {
             state.module_load_stack.push(frame);
             let result = crate::vm::module_run::load_and_run_bytecode(state, &found.bytes);

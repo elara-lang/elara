@@ -33,6 +33,7 @@ typedef enum elara_Status {
 #define ELARA_CAP_FIBER  (1u << 4)
 #define ELARA_CAP_SYS_ENV (1u << 5)
 #define ELARA_CAP_STDIO  (1u << 6)
+#define ELARA_CAP_NATIVE (1u << 7)
 #define ELARA_CAP_SAFE_DEFAULT \
     (ELARA_CAP_MATH | ELARA_CAP_STRING | ELARA_CAP_TABLE | ELARA_CAP_BIT | ELARA_CAP_FIBER)
 #define ELARA_CAP_ALL    (0xFFFFFFFFu)
@@ -130,9 +131,16 @@ typedef elara_Status (*elara_ModuleLoaderFn)(
     void*        ud
 );
 
+typedef elara_Status (*elara_NativeModuleOpenFn)(
+    elara_State* S, void* ud, elara_Value* out_exports);
+
 void         elara_set_module_loader(elara_State* S, elara_ModuleLoaderFn loader, void* ud);
 elara_Status elara_add_module_search_dir(elara_State* S, const char* dir);
 void         elara_set_module_anchor(elara_State* S, const char* dir);
+void         elara_register_native_module(
+    elara_State* S, const char* name, elara_NativeModuleOpenFn open, void* ud);
+elara_Value  elara_new_table(elara_State* S);
+elara_Status elara_table_set(elara_State* S, elara_Value table, const char* key, elara_Value val);
 void        elara_set_global(elara_State* S, const char* name, elara_Value val);
 elara_Value elara_get_global(elara_State* S, const char* name);
 const char* elara_last_error(const elara_State* S);

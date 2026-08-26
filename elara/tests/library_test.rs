@@ -2,14 +2,50 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use elara::compiler::compile_module;
-use elara::ffi::c_api::{elara_eval, elara_last_error};
+use elara::ffi::c_api::{
+    elara_eval, elara_is_nil, elara_last_error, elara_new_table, elara_register_native_module,
+    elara_table_set, elara_val_i48,
+};
+use elara::ffi::{ELARA_CAP_NATIVE, ELARA_CAP_SAFE_DEFAULT};
 use elara::value::Value;
 use elara::vm::{ElaraState, ElaraStatus, serialize_elac};
+
+static HOST_OPENS: AtomicU32 = AtomicU32::new(0);
+static MATH_OPENS: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn open_host_lib(
+    state: *mut ElaraState,
+    _ud: *mut c_void,
+    out: *mut u64,
+) -> ElaraStatus {
+    HOST_OPENS.fetch_add(1, Ordering::SeqCst);
+    let table = elara_new_table(state);
+    if elara_is_nil(table) {
+        return ElaraStatus::ErrOom;
+    }
+    let st = elara_table_set(state, table, c"n".as_ptr(), elara_val_i48(11));
+    if st != ElaraStatus::Ok {
+        return st;
+    }
+    *out = table;
+    ElaraStatus::Ok
+}
+
+unsafe extern "C" fn open_math_shadow(
+    state: *mut ElaraState,
+    _ud: *mut c_void,
+    out: *mut u64,
+) -> ElaraStatus {
+    MATH_OPENS.fetch_add(1, Ordering::SeqCst);
+    *out = elara_new_table(state);
+    ElaraStatus::Ok
+}
 
 fn eval_in(dir: &Path, source: &str) -> (ElaraStatus, Value, String) {
     let mut state = ElaraState::new();
@@ -298,4 +334,111 @@ fn library_ini_syntax_error_stops_the_cli_before_the_script() {
     );
     assert!(out.stdout.is_empty(), "script ran despite a bad ini");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn native_module_registered_by_host_loads_without_native_capability() {
+    HOST_OPENS.store(0, Ordering::SeqCst);
+    MATH_OPENS.store(0, Ordering::SeqCst);
+    let mut state = ElaraState::new();
+    state.capabilities = ELARA_CAP_SAFE_DEFAULT;
+    assert_eq!(state.capabilities & ELARA_CAP_NATIVE, 0);
+    let src = CString::new("import \"hostlib\" as h\nreturn h.n\n").unwrap();
+    let mut out = 0u64;
+    unsafe {
+        elara_register_native_module(
+            &mut state,
+            c"hostlib".as_ptr(),
+            Some(open_host_lib),
+            core::ptr::null_mut(),
+        );
+        elara_register_native_module(
+            &mut state,
+            c"math".as_ptr(),
+            Some(open_math_shadow),
+            core::ptr::null_mut(),
+        );
+        let st = elara_eval(&mut state, c"main".as_ptr(), src.as_ptr(), &mut out);
+        assert_eq!(st, ElaraStatus::Ok, "{}", last_error(&state));
+    }
+    assert_eq!(Value(out).to_i64(), Some(11));
+    assert_eq!(HOST_OPENS.load(Ordering::SeqCst), 1);
+    assert_eq!(MATH_OPENS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn native_so_loads_when_capability_set_and_is_hidden_when_unset() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let build = Command::new("make")
+        .arg("build")
+        .current_dir(&root)
+        .output()
+        .expect("make build");
+    assert!(
+        build.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let so_dir = temp_dir("natso");
+    let so = so_dir.join("native_demo.so");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let compiled = Command::new(cc)
+        .args([
+            "-std=c99", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC", "-I",
+        ])
+        .arg(root.join("elara/include"))
+        .arg(root.join("demos/09_native_library.c"))
+        .arg("-o")
+        .arg(&so)
+        .output()
+        .expect("cc");
+    assert!(
+        compiled.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let elara = root.join("bin/elara");
+    let script = root.join("demos/09_native_library.ela");
+    let loaded = Command::new(&elara)
+        .env("ELARA_SYS_INI", "")
+        .env_remove("ELARA_PATH")
+        .args(["--lib", so_dir.to_str().unwrap()])
+        .arg(&script)
+        .output()
+        .expect("elara");
+    assert!(
+        loaded.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&loaded.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&loaded.stdout), "42\n");
+    let hidden = Command::new(&elara)
+        .env("ELARA_SYS_INI", "")
+        .env_remove("ELARA_PATH")
+        .args(["--sandbox", "--lib", so_dir.to_str().unwrap()])
+        .arg(&script)
+        .output()
+        .expect("elara --sandbox");
+    assert!(!hidden.status.success());
+    let err = String::from_utf8_lossy(&hidden.stderr);
+    assert!(
+        err.contains("Module not found: 'native_demo'"),
+        "stderr={err}"
+    );
+    let _ = std::fs::remove_dir_all(&so_dir);
+}
+
+fn last_error(state: &ElaraState) -> String {
+    unsafe {
+        let p = elara_last_error(state);
+        if p.is_null() {
+            String::new()
+        } else {
+            core::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
 }

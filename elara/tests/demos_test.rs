@@ -22,9 +22,10 @@ fn demo_files() -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| {
             p.extension().and_then(|x| x.to_str()) == Some("ela")
-                && p.file_name()
-                    .and_then(|x| x.to_str())
-                    .is_some_and(|n| n.starts_with('0'))
+                && p.file_name().and_then(|x| x.to_str()).is_some_and(|n| {
+                    let b = n.as_bytes();
+                    b.len() >= 3 && b[0] == b'0' && matches!(b[1], b'1'..=b'7') && b[2] == b'_'
+                })
         })
         .collect();
     files.sort();
@@ -161,7 +162,7 @@ fn run_demos_script_succeeds_end_to_end() {
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("All 8 Elara demos passed (source + AOT .elac + C99 FFI)"),
+        stdout.contains("All 9 Elara demos passed (source + AOT .elac + C99 FFI + native library)"),
         "missing success banner: {stdout}"
     );
 }

@@ -13,6 +13,7 @@ pub mod library;
 mod meta;
 pub mod module;
 mod module_run;
+pub mod native_lib;
 pub mod sched;
 pub mod state;
 pub mod status;

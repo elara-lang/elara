@@ -27,6 +27,8 @@ pub struct LogicalSpec {
 pub struct DiskModule {
     pub bytes: Vec<u8>,
     pub is_bytecode: bool,
+    pub is_native: bool,
+    pub path: String,
     pub search_root: String,
     pub rel_dir: String,
 }
@@ -114,7 +116,7 @@ fn resolve_relative(rel_dir: &str, spec: &str) -> Result<String, SpecFail> {
     }
 }
 
-fn strip_module_suffix(key: &str) -> String {
+pub(crate) fn strip_module_suffix(key: &str) -> String {
     let (dir, base) = match key.rfind('/') {
         Some(i) => (&key[..i], &key[i + 1..]),
         None => ("", key),
@@ -141,12 +143,22 @@ pub fn parent_key(logical: &str) -> String {
     }
 }
 
-/// First existing `.elac`, `.ela`, `init.elac`, or `init.ela` candidate.
+/// First existing candidate: `.elac`, `.ela`, `init.elac`, `init.ela`, then `.so`.
 ///
-/// `only_root` limits the search to one directory (relative imports). An empty
-/// `dirs` list with no `only_root` searches `.`.
+/// `files` and `native` select which of those groups are visible. `only_root`
+/// limits the search to one directory (relative imports). An empty `dirs` list
+/// with no `only_root` searches `.`.
 #[must_use]
-pub fn find_module(dirs: &[String], logical: &str, only_root: Option<&str>) -> Option<DiskModule> {
+pub fn find_module(
+    dirs: &[String],
+    logical: &str,
+    only_root: Option<&str>,
+    files: bool,
+    native: bool,
+) -> Option<DiskModule> {
+    if !files && !native {
+        return None;
+    }
     let fallback;
     let search: &[String] = if let Some(root) = only_root {
         fallback = vec![root.to_string()];
@@ -164,23 +176,40 @@ pub fn find_module(dirs: &[String], logical: &str, only_root: Option<&str>) -> O
         (format!("{logical}/init.ela"), true),
     ];
     for dir in search {
-        for (name, is_init) in &names {
-            let path = join_dir(dir, name);
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let is_bytecode = bytes.len() >= 6 && bytes[0] == 0x1B && bytes[1..6] == *b"ELARA";
-            let rel_dir = if *is_init {
-                logical.to_string()
-            } else {
-                parent_key(logical)
-            };
-            return Some(DiskModule {
-                bytes,
-                is_bytecode,
-                search_root: dir.clone(),
-                rel_dir,
-            });
+        if files {
+            for (name, is_init) in &names {
+                let path = join_dir(dir, name);
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                let is_bytecode = bytes.len() >= 6 && bytes[0] == 0x1B && bytes[1..6] == *b"ELARA";
+                let rel_dir = if *is_init {
+                    logical.to_string()
+                } else {
+                    parent_key(logical)
+                };
+                return Some(DiskModule {
+                    bytes,
+                    is_bytecode,
+                    is_native: false,
+                    path,
+                    search_root: dir.clone(),
+                    rel_dir,
+                });
+            }
+        }
+        if native {
+            let path = join_dir(dir, &format!("{logical}.so"));
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(DiskModule {
+                    bytes: Vec::new(),
+                    is_bytecode: false,
+                    is_native: true,
+                    path,
+                    search_root: dir.clone(),
+                    rel_dir: parent_key(logical),
+                });
+            }
         }
     }
     None
