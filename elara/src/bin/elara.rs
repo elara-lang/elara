@@ -120,18 +120,14 @@ fn main() -> ExitCode {
     } else {
         ".".to_string()
     };
-    let mut dirs = vec![anchor.clone()];
-    if anchor != "." {
-        dirs.push(".".to_string());
-    }
-    dirs.extend(lib_dirs);
-    if let Ok(path) = env::var("ELARA_PATH") {
-        for part in path.split(':') {
-            if !part.is_empty() {
-                dirs.push(part.to_string());
-            }
+    let dirs = match elara::cli::module_search_dirs(&anchor, &lib_dirs) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("{err}");
+            unsafe { elara_close(state) };
+            return ExitCode::from(2);
         }
-    }
+    };
     unsafe {
         (*state).cli_args = script_args;
         (*state).module_anchor = Some(anchor);
