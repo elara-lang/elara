@@ -185,6 +185,34 @@ print(mx.add(2, 3))
 exports do módulo. `import "spec" as alias` carrega uma tabela de exports singleton
 (em cache). Imports circulares falham com erro de módulo. Módulos intrínsecos
 (`math`, `string`, `table`, `bit`, `sys`, `fiber`, `gc`) resolvem sem arquivos.
+Um sufixo `.ela` ou `.elac` no especificador é removido, então `math.ela` continua
+sendo o intrínseco `math`.
+
+### Caminho de busca
+
+Para qualquer outro nome, a CLI procura, nesta ordem: o diretório do script
+(`.` para `-e` e para o REPL), o diretório atual quando ele ainda não entrou na
+lista, cada `--lib <dir>` na ordem dada, entradas `lib_path` de um `elara.ini`
+local, diretórios em `ELARA_PATH` (separados por `:`, segmentos vazios
+ignorados) e, por último, entradas `lib_path` do arquivo de sistema. O primeiro
+candidato que existe vence. Dentro de um diretório os candidatos são
+`nome.elac`, `nome.ela`, `nome/init.elac`, `nome/init.ela` e, quando bibliotecas
+nativas são permitidas, `nome.so`.
+
+`import "./geom" as g` e `import "../util" as u` resolvem a partir do diretório
+do módulo que contém o import e só procuram na raiz daquele módulo. Um `..` que
+escapa da raiz, um caminho absoluto ou uma barra invertida é rejeitado.
+
+### elara.ini
+
+Só a CLI `elara` lê arquivos ini. `elarac` não lê. Um arquivo ausente é
+ignorado. O arquivo local é `elara.ini` no diretório do script (`.` para `-e` e
+para o REPL). O arquivo de sistema é `/etc/elara/elara.ini`, a menos que
+`ELARA_SYS_INI` nomeie outro caminho; `ELARA_SYS_INI` vazio pula o arquivo de
+sistema. As linhas são `lib_path = <dir>`. Um diretório relativo é juntado ao
+diretório do ini que o declarou. `;` e `#` iniciam uma linha de comentário. O
+arquivo não altera gás, o teto do heap nem capacidades. `--sandbox` continua
+sem ler bibliotecas do disco.
 
 ## Erros
 
