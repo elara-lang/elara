@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end demo runner: source + AOT .elac parity, then C99 FFI host.
+# End-to-end demo runner: source + AOT .elac parity, C99 FFI host, native library.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,4 +47,14 @@ CC="${CC:-cc}"
 /tmp/elara_ffi_demo
 rm -f /tmp/elara_ffi_demo
 
-echo "All 8 Elara demos passed (source + AOT .elac + C99 FFI)"
+echo "==> demos/09_native_library.c"
+so_dir="$(mktemp -d)"
+"$CC" -std=c99 -Wall -Wextra -Werror -shared -fPIC \
+  -Ielara/include \
+  demos/09_native_library.c \
+  -o "$so_dir/native_demo.so"
+echo "==> demos/09_native_library.ela"
+./bin/elara --lib "$so_dir" demos/09_native_library.ela
+rm -rf "$so_dir"
+
+echo "All 9 Elara demos passed (source + AOT .elac + C99 FFI + native library)"

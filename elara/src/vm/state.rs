@@ -75,6 +75,10 @@ pub struct ElaraState {
     pub module_load_stack: Vec<crate::vm::library::LoadFrame>,
     /// Scratch buffer for the most recent filesystem / host module load.
     pub module_load_buf: Vec<u8>,
+    /// Host openers consulted by name before the byte loader and the search path.
+    pub native_modules: Vec<crate::vm::native_lib::NativeModule>,
+    /// `dlopen` handles kept until after the GC heap is freed.
+    pub native_libs: Vec<usize>,
 }
 
 impl ElaraState {

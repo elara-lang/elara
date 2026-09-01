@@ -1,0 +1,2 @@
+import "native_demo" as n
+print(n.answer)

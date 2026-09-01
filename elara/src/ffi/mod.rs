@@ -13,8 +13,8 @@ pub use config::{ElaraConfig, ElaraModuleLoaderFn};
 pub use context::CallContext;
 pub use native::{ElaraNativeFn, ObjNativeFn};
 pub use sandbox::{
-    ELARA_CAP_ALL, ELARA_CAP_BIT, ELARA_CAP_FIBER, ELARA_CAP_MATH, ELARA_CAP_NONE,
-    ELARA_CAP_SAFE_DEFAULT, ELARA_CAP_STDIO, ELARA_CAP_STRING, ELARA_CAP_SYS_ENV, ELARA_CAP_TABLE,
-    ensure_module_allowed, has_capability, module_required_cap,
+    ELARA_CAP_ALL, ELARA_CAP_BIT, ELARA_CAP_FIBER, ELARA_CAP_MATH, ELARA_CAP_NATIVE,
+    ELARA_CAP_NONE, ELARA_CAP_SAFE_DEFAULT, ELARA_CAP_STDIO, ELARA_CAP_STRING, ELARA_CAP_SYS_ENV,
+    ELARA_CAP_TABLE, ensure_module_allowed, has_capability, module_required_cap,
 };
 pub use userdata::{ElaraFinalizer, ElaraTraceFn, ElaraUserdataDesc, ObjUserdata};

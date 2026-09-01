@@ -11,6 +11,7 @@ pub const ELARA_CAP_BIT: u32 = 1 << 3;
 pub const ELARA_CAP_FIBER: u32 = 1 << 4;
 pub const ELARA_CAP_SYS_ENV: u32 = 1 << 5;
 pub const ELARA_CAP_STDIO: u32 = 1 << 6;
+pub const ELARA_CAP_NATIVE: u32 = 1 << 7;
 pub const ELARA_CAP_SAFE_DEFAULT: u32 =
     ELARA_CAP_MATH | ELARA_CAP_STRING | ELARA_CAP_TABLE | ELARA_CAP_BIT | ELARA_CAP_FIBER;
 pub const ELARA_CAP_ALL: u32 = 0xFFFF_FFFF;
