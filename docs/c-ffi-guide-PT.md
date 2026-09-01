@@ -171,18 +171,56 @@ bytes.
 
 ### Bibliotecas compartilhadas
 
-Com `ELARA_CAP_NATIVE` ligado, um arquivo `nome.so` no caminho de busca é
-aberto com `dlopen` e precisa exportar:
+Com `ELARA_CAP_NATIVE` ligado, um arquivo `nome.so` no caminho de busca é o
+último candidato daquele nome. Ele é aberto com `dlopen`
+(`RTLD_NOW | RTLD_LOCAL`) e precisa exportar:
 
 ```c
 elara_Status elara_open_lib(elara_State *S, elara_Value *out_exports);
 ```
 
-O handle permanece mapeado até `elara_close` terminar de liberar o heap. Uma
-abertura que falha é fechada na hora. `bin/elara` é ligado com
-`--export-dynamic` para a biblioteca chamar `elara_*`.
-`demos/09_native_library.c` é um exemplo pequeno carregado por
-`demos/09_native_library.ela`.
+Escreva o opener, compile-o como objeto compartilhado com o nome do import e
+aponte `--lib` para o diretório. `demos/09_native_library.c`:
+
+```c
+#include "elara.h"
+
+elara_Status elara_open_lib(elara_State *S, elara_Value *out_exports) {
+    elara_Value table = elara_new_table(S);
+    if (elara_is_nil(table)) return ELARA_ERR_OOM;
+    elara_Status st = elara_table_set(S, table, "answer", elara_val_i48(42));
+    if (st != ELARA_OK) return st;
+    *out_exports = table;
+    return ELARA_OK;
+}
+```
+
+`demos/09_native_library.ela` importa esse arquivo como `native_demo`:
+
+```
+import "native_demo" as n
+print(n.answer)
+```
+
+```bash
+make build
+cc -std=c99 -Wall -Wextra -Werror -shared -fPIC \
+  -Ielara/include demos/09_native_library.c \
+  -o /tmp/native_demo.so
+./bin/elara --lib /tmp demos/09_native_library.ela
+```
+
+Não ligue esse `.so` contra `libelara`. `bin/elara` é compilado com
+`--export-dynamic`, então `elara_new_table` e os outros símbolos `elara_*`
+resolvem no processo que chamou `dlopen`. Um host que carrega `.so` a partir
+de uma `libelara.a` estática precisa exportar `elara_*` do mesmo modo.
+`libelara.so` já os exporta.
+
+O handle permanece mapeado até `elara_close` terminar de liberar o heap, para
+um finalizador nativo ainda poder rodar. Uma abertura que falha é fechada na
+hora. A VM não lê `elara.ini`; passe os mesmos diretórios com
+`elara_add_module_search_dir` e ligue `ELARA_CAP_NATIVE` na configuração quando
+o host mesmo for abrir os `.so`.
 
 ## Hooks de Debug
 

@@ -4,18 +4,20 @@ High-performance embeddable scripting language, register-based bytecode VM, AOT 
 
 ## Highlights
 
-- Pack IEEE-754 floats, signed 48-bit integers, booleans, nil, and tagged GC pointers into 8-byte NaN-tagged values with transparent 64-bit integer promotion
-- Execute 32-bit register bytecode with fused compare-and-branch dispatch, 1-slot inline property caching, and strict tail-call optimization
-- Store dense 0-based arrays alongside Robin Hood open-addressed hash tables inside a single 64-byte CPU cache-line header
-- Intern short UTF-8 strings up to 64 bytes in O(1) while hashing long strings lazily to avoid allocation stalls
-- Enforce lexical scoping with explicit let and const bindings, compound assignments, nested string interpolation, and LIFO defer resource cleanup
-- Run stackful cooperative fibers and incremental tri-color garbage collection with weak tables under a deterministic microsecond pause budget
-- Sandbox untrusted scripts with CPU register fuel quotas, hard heap memory ceilings, and capability-gated standard library modules
-- Embed into C99, C++, or Rust hosts via a zero-dependency static or dynamic library and a direct slot-based C API
+- Run a script, an inline snippet, or the REPL with the elara command
+- Compile a source file to .elac bytecode ahead of time with elarac
+- Embed the runtime in C99, C++, or Rust through one C header and a static or shared library
+- Sandbox untrusted scripts with instruction fuel, a heap ceiling, and capability flags
+- Write scripts with explicit let and const, 0-based tables, defer cleanup, and cooperative fibers
+- Import a library from the script directory, --lib, ELARA_PATH, or elara.ini
+- Load a native module the host registered, or a shared library on the search path
+- Build the compiler and the VM with Rust std only and no external crates
 
 ## Overview
 
-Elara is a clean-slate embeddable scripting language engineered in Rust (Edition 2024) with zero external crate dependencies. It combines the tiny footprint and C ABI portability of classic embeddable VMs with modern language ergonomics: 0-based indexing, `{ }` lexical blocks, static scope verification, `defer` resource management, and deterministic sandboxing.
+Elara is an embeddable scripting language written in Rust (Edition 2024) with no external crates. Scripts use 0-based indexing, `{ }` blocks, `let` and `const`, `defer`, and a sandbox for untrusted code.
+
+The language, library loading, and the C API are documented in [the language reference](docs/language-reference.md), [the C FFI guide](docs/c-ffi-guide.md), and [the architecture guide](docs/architecture.md).
 
 ## Prerequisites
 
