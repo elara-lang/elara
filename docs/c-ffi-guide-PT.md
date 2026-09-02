@@ -127,6 +127,7 @@ Bits de capacidade controlam módulos intrínsecos:
 | `ELARA_CAP_FIBER`     | `fiber`                 |
 | `ELARA_CAP_SYS_ENV`   | `sys.env` / `args` / FS |
 | `ELARA_CAP_STDIO`     | `print`                 |
+| `ELARA_CAP_NATIVE`    | load a `.so` from disk  |
 | `ELARA_CAP_SAFE_DEFAULT` | math+string+table+bit+fiber |
 | `ELARA_CAP_ALL`       | unrestricted            |
 
@@ -134,6 +135,54 @@ Combustível de instruções (`gas_limit`) retorna `ELARA_ERR_GAS` quando esgota
 Tetos de heap (`mem_limit_bytes`) retornam `ELARA_ERR_OOM` após uma coleta de
 emergência falhar em liberar memória suficiente. Combine ambos com uma máscara
 estreita de capacidades para plugins não confiáveis.
+`ELARA_CAP_SAFE_DEFAULT` não inclui `ELARA_CAP_NATIVE`. `--sandbox` é essa
+máscara mais `ELARA_CAP_STDIO`, então não lê bibliotecas do disco nem abre um
+`.so`.
+
+## Módulos Nativos
+
+Um módulo nativo é uma tabela de exports produzida em C. Ele fica em cache sob
+o mesmo nome lógico de um módulo em fonte. Um opener registrado para `math` (ou
+qualquer outro intrínseco) é guardado e nunca chamado.
+
+### Openers registrados
+
+```c
+elara_Status open_geom(elara_State *S, void *ud, elara_Value *out) {
+    (void)ud;
+    elara_Value t = elara_new_table(S);
+    if (elara_is_nil(t)) return ELARA_ERR_OOM;
+    elara_Status st = elara_table_set(S, t, "n", elara_val_i48(7));
+    if (st != ELARA_OK) return st;
+    *out = t;
+    return ELARA_OK;
+}
+
+elara_register_native_module(S, "geom", open_geom, NULL);
+```
+
+`elara_new_table` devolve nil em falta de memória e não dispara erro.
+`elara_table_set` interna `key` e grava o campo. Uma chave NULL ou um receptor
+que não é tabela devolve `ELARA_ERR_RUNTIME`. Esse registro funciona com ou sem
+`ELARA_CAP_NATIVE`. A VM não libera `ud`. `elara_add_module_search_dir`
+acrescenta um diretório de busca e `elara_set_module_anchor` define o diretório
+de entrada usado por imports relativos de um módulo que o host entregou em
+bytes.
+
+### Bibliotecas compartilhadas
+
+Com `ELARA_CAP_NATIVE` ligado, um arquivo `nome.so` no caminho de busca é
+aberto com `dlopen` e precisa exportar:
+
+```c
+elara_Status elara_open_lib(elara_State *S, elara_Value *out_exports);
+```
+
+O handle permanece mapeado até `elara_close` terminar de liberar o heap. Uma
+abertura que falha é fechada na hora. `bin/elara` é ligado com
+`--export-dynamic` para a biblioteca chamar `elara_*`.
+`demos/09_native_library.c` é um exemplo pequeno carregado por
+`demos/09_native_library.ela`.
 
 ## Hooks de Debug
 

@@ -180,7 +180,33 @@ print(mx.add(2, 3))
 `export let` / `export const` / `export fn` bind a local and publish it on the module
 exports table. `import "spec" as alias` loads a singleton exports table (cached).
 Circular imports fail with a module error. Intrinsic modules (`math`, `string`,
-`table`, `bit`, `sys`, `fiber`, `gc`) resolve without files.
+`table`, `bit`, `sys`, `fiber`, `gc`) resolve without files. A trailing `.ela` or
+`.elac` on the specifier is stripped, so `math.ela` is still the intrinsic `math`.
+
+### Search path
+
+For any other name the CLI searches, in order: the script's directory (`.` for
+`-e` and the REPL), the current directory when it is not already listed, each
+`--lib <dir>` in order, `lib_path` entries from a local `elara.ini`, directories
+in `ELARA_PATH` (split on `:`, empty segments dropped), then `lib_path` entries
+from the system file. The first existing candidate wins. Inside one directory
+the candidates are `name.elac`, `name.ela`, `name/init.elac`, `name/init.ela`,
+and, when native libraries are allowed, `name.so`.
+
+`import "./geom" as g` and `import "../util" as u` resolve against the directory
+of the module that contains the import, then search only that module's root.
+`..` that escapes the root, an absolute path, or a backslash is rejected.
+
+### elara.ini
+
+Only the `elara` CLI reads ini files. `elarac` does not. A missing file is
+ignored. The local file is `elara.ini` in the script directory (`.` for `-e`
+and the REPL). The system file is `/etc/elara/elara.ini` unless `ELARA_SYS_INI`
+names another path; an empty `ELARA_SYS_INI` skips the system file. Lines are
+`lib_path = <dir>`. A relative directory is joined to the directory of the ini
+file that declared it. `;` and `#` start a comment line. The file cannot change
+gas, the heap ceiling, or capabilities. `--sandbox` still refuses to read
+libraries from disk.
 
 ## Errors
 
