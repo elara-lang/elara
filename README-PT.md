@@ -4,18 +4,20 @@ Linguagem de script embarcável de alta performance, VM de bytecode baseada em r
 
 ## Destaques
 
-- Compacta floats IEEE-754, inteiros de 48 bits com sinal, booleanos, nil e ponteiros GC em valores NaN-tagged de 8 bytes com promoção transparente para inteiros de 64 bits
-- Executa bytecode de registradores de 32 bits com despacho fundido de comparação e salto, inline caching de 1 slot e otimização estrita de chamada de cauda
-- Armazena arrays densos indexados em 0 junto a tabelas hash Robin Hood em um único cabeçalho de 64 bytes alinhado à linha de cache da CPU
-- Interna strings UTF-8 curtas de até 64 bytes em O(1) enquanto calcula o hash de strings longas sob demanda para evitar pausas de alocação
-- Impõe escopo léxico com declarações explícitas let e const, operadores de atribuição composta, interpolação aninhada de strings e limpeza determinística com defer em ordem LIFO
-- Executa fibers cooperativas com pilha própria e coleta de lixo incremental tricolor com tabelas fracas sob orçamento determinístico de pausa em microssegundos
-- Isola scripts não confiáveis com cotas de instruções em registrador de CPU, limite rígido de memória heap e módulos da biblioteca padrão controlados por capacidades
-- Embarca em aplicações C99, C++ ou Rust através de biblioteca estática ou dinâmica sem dependências externas e uma API C direta baseada em slots
+- Executa um script, um trecho inline ou o REPL com o comando elara
+- Compila um arquivo-fonte para bytecode .elac antecipadamente com elarac
+- Embarca o runtime em C99, C++ ou Rust por um cabeçalho C e uma biblioteca estática ou compartilhada
+- Isola scripts não confiáveis com combustível de instruções, teto de heap e flags de capacidade
+- Escreve scripts com let e const explícitos, tabelas indexadas em 0, limpeza com defer e fibers cooperativas
+- Importa uma biblioteca do diretório do script, de --lib, de ELARA_PATH ou de elara.ini
+- Carrega um módulo nativo registrado pelo host ou uma biblioteca compartilhada no caminho de busca
+- Compila o compilador e a VM só com a std do Rust, sem crates externos
 
 ## Visão Geral
 
-Elara é uma linguagem de script embarcável projetada do zero em Rust (Edition 2024) com zero dependências de crates externos. Ela combina o baixo consumo de memória e a portabilidade de ABI C das VMs embarcáveis clássicas com ergonomia moderna: indexação baseada em 0, blocos léxicos com `{ }`, verificação estática de escopo, gerenciamento determinístico de recursos com `defer` e sandboxing nativo.
+Elara é uma linguagem de script embarcável escrita em Rust (Edition 2024), sem crates externos. Os scripts usam indexação em 0, blocos `{ }`, `let` e `const`, `defer` e um sandbox para código não confiável.
+
+A linguagem, o carregamento de bibliotecas e a API C estão na [referência da linguagem](docs/language-reference-PT.md), no [guia C-FFI](docs/c-ffi-guide-PT.md) e no [guia de arquitetura](docs/architecture-PT.md).
 
 ## Pré-requisitos
 

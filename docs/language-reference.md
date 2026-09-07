@@ -185,28 +185,168 @@ Circular imports fail with a module error. Intrinsic modules (`math`, `string`,
 
 ### Search path
 
-For any other name the CLI searches, in order: the script's directory (`.` for
-`-e` and the REPL), the current directory when it is not already listed, each
-`--lib <dir>` in order, `lib_path` entries from a local `elara.ini`, directories
-in `ELARA_PATH` (split on `:`, empty segments dropped), then `lib_path` entries
-from the system file. The first existing candidate wins. Inside one directory
-the candidates are `name.elac`, `name.ela`, `name/init.elac`, `name/init.ela`,
-and, when native libraries are allowed, `name.so`.
+`elara` looks for a logical name in this order. The first hit wins.
+
+1. The script's directory. `-e` and the REPL use `.`.
+2. The current directory, when it is not already listed.
+3. Each `--lib <dir>`, in the order written on the command line.
+4. Each `lib_path` in the local `elara.ini`, in file order.
+5. Each directory in `ELARA_PATH`, split on `:`. Empty segments are dropped.
+6. Each `lib_path` in the system ini.
+
+Inside one directory the candidates are `name.elac`, `name.ela`,
+`name/init.elac`, `name/init.ela`, and, when native libraries are allowed,
+`name.so`. A bytecode file is preferred over source in the same directory.
+There is no unsuffixed file candidate.
+
+A small library tree:
+
+```
+proj/
+  main.ela
+  elara.ini
+  libs/
+    vec/
+      init.ela
+      geom.ela
+```
+
+`proj/libs/vec/geom.ela`:
+
+```
+export const n = 7
+```
+
+`proj/libs/vec/init.ela`:
+
+```
+import "./geom" as g
+export const geom = g
+export const n = g.n
+```
+
+`proj/main.ela`:
+
+```
+import "vec" as v
+print(v.n)
+```
+
+`proj/elara.ini` is the file in the next section. From any working directory:
+
+```bash
+./bin/elara proj/main.ela
+```
+
+The same library loads without an ini file:
+
+```bash
+./bin/elara --lib proj/libs proj/main.ela
+ELARA_PATH=proj/libs ./bin/elara proj/main.ela
+```
+
+`--lib` is repeatable. A later directory is consulted only when every earlier
+directory missed that name.
+
+### Relative imports
 
 `import "./geom" as g` and `import "../util" as u` resolve against the directory
-of the module that contains the import, then search only that module's root.
-`..` that escapes the root, an absolute path, or a backslash is rejected.
+of the file that contains the import, then search only that file's search root.
+In the tree above, `vec/init.ela` was found under `proj/libs`, so `./geom`
+becomes `vec/geom` and is opened as `proj/libs/vec/geom.ela`.
+
+A `..` that leaves the root, an absolute path (`/…`), or a backslash is
+rejected. A relative import in a chunk that has no file anchor (a byte buffer
+the host loaded without `elara_set_module_anchor`) fails the same way.
 
 ### elara.ini
 
-Only the `elara` CLI reads ini files. `elarac` does not. A missing file is
-ignored. The local file is `elara.ini` in the script directory (`.` for `-e`
-and the REPL). The system file is `/etc/elara/elara.ini` unless `ELARA_SYS_INI`
-names another path; an empty `ELARA_SYS_INI` skips the system file. Lines are
-`lib_path = <dir>`. A relative directory is joined to the directory of the ini
-file that declared it. `;` and `#` start a comment line. The file cannot change
-gas, the heap ceiling, or capabilities. `--sandbox` still refuses to read
-libraries from disk.
+Only the `elara` command reads ini files. `elarac` does not, and an embedded
+host does not either unless it copies the directories into
+`elara_add_module_search_dir`. A missing file is ignored. A syntax error stops
+the CLI before the script runs.
+
+Create `elara.ini` next to the script (for `-e` and the REPL, next to the
+current directory):
+
+```
+; project libraries
+# one directory per line, file order is search order
+lib_path = libs
+lib_path = ../shared
+```
+
+`lib_path` is the only key. A relative value is joined to the directory of the
+ini file itself, not to the current directory. `libs` in `proj/elara.ini` is
+`proj/libs` even when you launch `elara` from somewhere else. `..` in that
+value is allowed and is not canonicalized. The directory does not have to
+exist when the CLI starts.
+
+Comments are full lines that, after trimming, start with `;` or `#`. Blank
+lines are skipped. A `[section]` header, a line without `=`, an unknown key, or
+an empty `lib_path` is an error. The file cannot set gas, the heap ceiling, or
+capabilities. `--sandbox` still refuses to read `.ela`, `.elac`, and `.so`
+files.
+
+The system file is `/etc/elara/elara.ini`. Create it the same way when every
+user should see a shared root:
+
+```
+lib_path = /usr/local/share/elara
+```
+
+`ELARA_SYS_INI=/other/elara.ini` reads that path instead. `ELARA_SYS_INI=`
+(empty) skips the system file. Unset `ELARA_SYS_INI` means
+`/etc/elara/elara.ini`.
+
+### Native libraries
+
+A `name.so` on the search path is the last candidate for that directory. The
+default `elara` process may open it. `--sandbox` hides it, and the import fails
+as "module not found" rather than as a capability error. How to write and
+compile the `.so` is in the C FFI guide.
+
+## Command line
+
+`elara` runs source or bytecode. Paths after the script become `sys.args` when
+the `sys` capability is enabled.
+
+```bash
+./bin/elara script.ela
+./bin/elara -e 'print(1)'
+./bin/elara --lib libs --lib /opt/extra script.ela
+./bin/elara --sandbox --gas 100000 --mem-limit 1048576 script.ela
+./bin/elara --disasm script.elac
+```
+
+| Option | Effect |
+| --- | --- |
+| `-e <code>` | Evaluate one snippet and exit. The anchor directory is `.` |
+| `--gas <N>` | Instruction budget. Exhaustion stops the script |
+| `--mem-limit <N>` | Heap ceiling in bytes |
+| `--sandbox` | Safe intrinsics plus `print`. No disk libraries and no `.so` |
+| `--lib <dir>` | Append one search directory. Repeat the flag to append more |
+| `--disasm` | Print bytecode before running |
+| `-v`, `--version` | Print the version |
+| `-h`, `--help` | Print the option list |
+
+`elarac` compiles one `.ela` file. It does not search libraries and does not
+read `elara.ini`.
+
+```bash
+./bin/elarac -o script.elac script.ela
+./bin/elarac --check script.ela
+./bin/elarac --strip --disasm script.ela
+```
+
+| Option | Effect |
+| --- | --- |
+| `-o <out.elac>` | Output path. The default replaces `.ela` with `.elac` |
+| `--strip` | Set the strip_debug_info bit in the `.elac` header |
+| `--check` | Compile and verify, then write nothing |
+| `--disasm` | Print the compiled prototype |
+| `-v`, `--version` | Print the version |
+| `-h`, `--help` | Print the option list |
 
 ## Errors
 
@@ -224,6 +364,11 @@ let ok, err = pcall(fn() { panic("boom") })
 
 Intrinsic modules are imported automatically into script prologues when the host
 capability bitmask allows them.
+
+```
+print(math.abs(-3))          /* 3 */
+print(string.slice("elara", 1, 4))  /* lar */
+```
 
 ### math
 

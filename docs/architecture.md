@@ -133,6 +133,20 @@ A metatable field `__mode = "k" | "v" | "kv"` marks keys and/or values as weak. 
 entries whose referent is still white after Propagate are cleared in Atomic so caches
 evict unreachable objects without retaining them as strong roots.
 
+## Module Loading
+
+`OP_IMPORT` keys a single cache of exports tables. An entry that is still
+loading is a circular import. The normalized names `math`, `string`, `table`,
+`bit`, `sys`, `fiber`, and `gc` resolve inside the VM before any host opener,
+byte loader, or directory is considered, so a file or a `.so` cannot replace
+them.
+
+The CLI builds the directory list (`--lib`, `elara.ini`, `ELARA_PATH`) and
+stores it on the state. The VM only walks that list. Reading `.ela` and
+`.elac` requires `ELARA_CAP_SYS_ENV`. Opening a `.so` requires
+`ELARA_CAP_NATIVE`. A host-registered opener runs without that bit. The search
+order and the ini file format are specified in the language reference.
+
 ## Elara vs Lua
 
 | Topic              | Elara 1.0                                      | Lua 5.5                                      |

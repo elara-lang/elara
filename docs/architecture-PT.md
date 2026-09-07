@@ -141,6 +141,20 @@ Um campo de metatable `__mode = "k" | "v" | "kv"` marca chaves e/ou valores como
 fracos. Entradas fracas cujo referente ainda é branco após Propagate são limpas em
 Atomic para que caches evictem objetos inalcançáveis sem retê-los como raízes fortes.
 
+## Carregamento de Módulos
+
+`OP_IMPORT` indexa um único cache de tabelas de exports. Uma entrada que ainda
+está carregando é um import circular. Os nomes normalizados `math`, `string`,
+`table`, `bit`, `sys`, `fiber` e `gc` resolvem dentro da VM antes de qualquer
+opener do host, carregador de bytes ou diretório, então um arquivo ou um `.so`
+não pode substituí-los.
+
+A CLI monta a lista de diretórios (`--lib`, `elara.ini`, `ELARA_PATH`) e a
+guarda no estado. A VM só percorre essa lista. Ler `.ela` e `.elac` exige
+`ELARA_CAP_SYS_ENV`. Abrir um `.so` exige `ELARA_CAP_NATIVE`. Um opener
+registrado pelo host roda sem esse bit. A ordem de busca e o formato do ini
+estão na referência da linguagem.
+
 ## Elara vs Lua
 
 | Tópico             | Elara 1.0                                      | Lua 5.5                                      |
